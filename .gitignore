@@ -1,5 +1,6 @@
 # OS Files
 .DS_Store
+.worktrees/
 
 # Object files
 *.o
