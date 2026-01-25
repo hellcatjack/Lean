@@ -49,4 +49,8 @@
     <ProjectReference Include="..\Configuration\QuantConnect.Configuration.csproj" />
     <ProjectReference Include="..\Logging\QuantConnect.Logging.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage.Tests/**/*.cs" />
+    <Compile Remove="InteractiveBrokers/QuantConnect.InteractiveBrokersBrokerage/**/*.cs" />
+  </ItemGroup>
 </Project>
