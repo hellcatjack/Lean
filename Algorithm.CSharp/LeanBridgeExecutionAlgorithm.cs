@@ -18,6 +18,7 @@ using System.IO;
 using Newtonsoft.Json.Linq;
 using QuantConnect;
 using QuantConnect.Algorithm;
+using QuantConnect.Configuration;
 using QuantConnect.Data;
 
 namespace QuantConnect.Algorithm.CSharp
