@@ -16,7 +16,9 @@
 using System.Collections.Generic;
 using System.IO;
 using Newtonsoft.Json.Linq;
+using QuantConnect;
 using QuantConnect.Algorithm;
+using QuantConnect.Data;
 
 namespace QuantConnect.Algorithm.CSharp
 {
@@ -25,11 +27,22 @@ namespace QuantConnect.Algorithm.CSharp
     /// </summary>
     public class LeanBridgeExecutionAlgorithm : QCAlgorithm
     {
+        private bool _executed;
+        private List<ExecutionRequest> _requests = new();
+
         public class IntentItem
         {
             public string Symbol { get; set; }
             public decimal Quantity { get; set; }
             public decimal Weight { get; set; }
+        }
+
+        public class ExecutionRequest
+        {
+            public string Symbol { get; set; }
+            public decimal Quantity { get; set; }
+            public decimal Weight { get; set; }
+            public bool UseQuantity { get; set; }
         }
 
         public static List<IntentItem> LoadIntentItems(string path)
@@ -69,10 +82,89 @@ namespace QuantConnect.Algorithm.CSharp
             return items;
         }
 
+        public static List<ExecutionRequest> BuildRequests(IEnumerable<IntentItem> items)
+        {
+            var requests = new List<ExecutionRequest>();
+            if (items == null)
+            {
+                return requests;
+            }
+
+            foreach (var item in items)
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                var symbol = item.Symbol?.Trim();
+                if (string.IsNullOrWhiteSpace(symbol))
+                {
+                    continue;
+                }
+
+                if (item.Quantity > 0)
+                {
+                    requests.Add(new ExecutionRequest
+                    {
+                        Symbol = symbol,
+                        Quantity = item.Quantity,
+                        Weight = 0m,
+                        UseQuantity = true
+                    });
+                    continue;
+                }
+
+                if (item.Weight > 0)
+                {
+                    requests.Add(new ExecutionRequest
+                    {
+                        Symbol = symbol,
+                        Quantity = 0m,
+                        Weight = item.Weight,
+                        UseQuantity = false
+                    });
+                }
+            }
+
+            return requests;
+        }
+
         public override void Initialize()
         {
             SetCash(100000);
             SetBenchmark(x => 0m);
+
+            var intentPath = Config.Get("execution-intent-path", string.Empty);
+            var items = LoadIntentItems(intentPath);
+            _requests = BuildRequests(items);
+
+            foreach (var request in _requests)
+            {
+                AddEquity(request.Symbol, Resolution.Minute);
+            }
+        }
+
+        public override void OnData(Slice data)
+        {
+            if (_executed || _requests.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var request in _requests)
+            {
+                if (request.UseQuantity)
+                {
+                    MarketOrder(request.Symbol, request.Quantity);
+                    continue;
+                }
+
+                SetHoldings(request.Symbol, request.Weight);
+            }
+
+            _executed = true;
+            Log("EXECUTED_ONCE");
         }
     }
 }

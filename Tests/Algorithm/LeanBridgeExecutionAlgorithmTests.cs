@@ -23,5 +23,27 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual(0m, items[1].Quantity);
             Assert.AreEqual(0.2m, items[1].Weight);
         }
+
+        [Test]
+        public void QuantityTakesPriorityOverWeight()
+        {
+            var items = new[]
+            {
+                new LeanBridgeExecutionAlgorithm.IntentItem
+                {
+                    Symbol = "AAPL",
+                    Quantity = 1m,
+                    Weight = 0.5m
+                }
+            };
+
+            var requests = LeanBridgeExecutionAlgorithm.BuildRequests(items);
+
+            Assert.AreEqual(1, requests.Count);
+            Assert.AreEqual("AAPL", requests[0].Symbol);
+            Assert.AreEqual(1m, requests[0].Quantity);
+            Assert.AreEqual(0m, requests[0].Weight);
+            Assert.IsTrue(requests[0].UseQuantity);
+        }
     }
 }
