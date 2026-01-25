@@ -414,6 +414,7 @@
     <ProjectReference Include="..\Algorithm\QuantConnect.Algorithm.csproj" />
     <ProjectReference Include="..\Api\QuantConnect.Api.csproj" />
     <ProjectReference Include="..\Brokerages\QuantConnect.Brokerages.csproj" />
+    <ProjectReference Include="..\Brokerages\InteractiveBrokers\QuantConnect.InteractiveBrokersBrokerage\QuantConnect.InteractiveBrokersBrokerage.csproj" />
     <ProjectReference Include="..\Common\QuantConnect.csproj" />
     <ProjectReference Include="..\Compression\QuantConnect.Compression.csproj" />
     <ProjectReference Include="..\Configuration\QuantConnect.Configuration.csproj" />
