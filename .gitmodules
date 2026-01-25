@@ -1,0 +1,3 @@
+[submodule "Brokerages/InteractiveBrokers"]
+	path = Brokerages/InteractiveBrokers
+	url = git@github.com:QuantConnect/Lean.Brokerages.InteractiveBrokers.git
