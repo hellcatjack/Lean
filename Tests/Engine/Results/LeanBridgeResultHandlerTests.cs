@@ -19,11 +19,14 @@ using System.IO;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using QuantConnect.Configuration;
+using QuantConnect.Brokerages.InteractiveBrokers;
 using QuantConnect.Lean.Engine.Results;
 using QuantConnect.Lean.Engine.TransactionHandlers;
 using QuantConnect.Messaging;
+using QuantConnect.Orders;
 using QuantConnect.Packets;
 using QuantConnect.Tests.Engine.DataFeeds;
+using QuantConnect.Util;
 
 namespace QuantConnect.Tests.Engine.Results
 {
@@ -38,11 +41,12 @@ namespace QuantConnect.Tests.Engine.Results
             Config.Set("lean-bridge-snapshot-seconds", "0");
             Config.Set("lean-bridge-heartbeat-seconds", "0");
 
-            using var messaging = new Messaging();
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            var api = new QuantConnect.Api.Api();
             var handler = new LeanBridgeResultHandler();
-            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, null, new BacktestingTransactionHandler(), null));
+            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, new BacktestingTransactionHandler(), null));
 
-            var algorithm = new AlgorithmStub(createDataManager: false);
+            var algorithm = new AlgorithmStub();
             algorithm.SetFinishedWarmingUp();
             algorithm.AddEquity("SPY").Holdings.SetHoldings(1, 10);
             handler.SetAlgorithm(algorithm, 100000);
@@ -55,6 +59,106 @@ namespace QuantConnect.Tests.Engine.Results
 
             var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
             Assert.AreEqual("lean_bridge", (string)json["source"]);
+        }
+
+        [Test]
+        public void BuildAccountSummaryUsesBrokerageSnapshot()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            Config.Set("lean-bridge-output-dir", dir);
+            Config.Set("lean-bridge-snapshot-seconds", "0");
+            Config.Set("lean-bridge-heartbeat-seconds", "0");
+
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            var api = new QuantConnect.Api.Api();
+            var transactionHandler = new TestBrokerageTransactionHandler();
+            var handler = new LeanBridgeResultHandler();
+            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
+
+            var algorithm = new AlgorithmStub();
+            algorithm.SetFinishedWarmingUp();
+            handler.SetAlgorithm(algorithm, 100000);
+
+            var brokerage = new InteractiveBrokersBrokerage();
+            brokerage.SetAccountSummaryValueForTesting("BASE", "NetLiquidation", "123456.78");
+            brokerage.SetAccountSummaryValueForTesting("BASE", "TotalCashValue", "90000.00");
+            transactionHandler.Initialize(algorithm, brokerage, handler);
+
+            handler.ProcessSynchronousEvents(true);
+
+            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
+            Assert.AreEqual(123456.78m, json["items"]["NetLiquidation"].Value<decimal>());
+            Assert.AreEqual(90000.00m, json["items"]["TotalCashValue"].Value<decimal>());
+            Assert.AreEqual("lean_bridge", (string)json["source"]);
+        }
+
+        [Test]
+        public void BuildAccountSummaryMergesBaseFirstAndAccountUpdates()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            Config.Set("lean-bridge-output-dir", dir);
+            Config.Set("lean-bridge-snapshot-seconds", "0");
+            Config.Set("lean-bridge-heartbeat-seconds", "0");
+
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            var api = new QuantConnect.Api.Api();
+            var transactionHandler = new TestBrokerageTransactionHandler();
+            var handler = new LeanBridgeResultHandler();
+            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
+
+            var algorithm = new AlgorithmStub();
+            algorithm.SetFinishedWarmingUp();
+            handler.SetAlgorithm(algorithm, 100000);
+
+            var brokerage = new InteractiveBrokersBrokerage();
+            brokerage.SetAccountSummaryValueForTesting("USD", "NetLiquidation", "100");
+            brokerage.SetAccountSummaryValueForTesting("BASE", "NetLiquidation", "200");
+            brokerage.SetAccountSummaryValueForTesting("BASE", "TotalCashValue", "150");
+            brokerage.SetAccountValueForTesting("BASE", "TotalCashValue", "175");
+            transactionHandler.Initialize(algorithm, brokerage, handler);
+
+            handler.ProcessSynchronousEvents(true);
+
+            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
+            Assert.AreEqual(200m, json["items"]["NetLiquidation"].Value<decimal>());
+            Assert.AreEqual(175m, json["items"]["TotalCashValue"].Value<decimal>());
+        }
+
+        [Test]
+        public void BuildAccountSummaryMarksStaleWhenEmpty()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            Config.Set("lean-bridge-output-dir", dir);
+            Config.Set("lean-bridge-snapshot-seconds", "0");
+            Config.Set("lean-bridge-heartbeat-seconds", "0");
+
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            var api = new QuantConnect.Api.Api();
+            var transactionHandler = new TestBrokerageTransactionHandler();
+            var handler = new LeanBridgeResultHandler();
+            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
+
+            var algorithm = new AlgorithmStub();
+            algorithm.SetFinishedWarmingUp();
+            handler.SetAlgorithm(algorithm, 100000);
+
+            var brokerage = new InteractiveBrokersBrokerage();
+            transactionHandler.Initialize(algorithm, brokerage, handler);
+
+            handler.ProcessSynchronousEvents(true);
+
+            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
+            Assert.IsTrue(json["items"].HasValues == false);
+            Assert.IsTrue(json["stale"].Value<bool>());
+            Assert.AreEqual("ib_account_empty", (string)json["source_detail"]);
+        }
+
+        private class TestBrokerageTransactionHandler : BrokerageTransactionHandler
+        {
+            protected override void InitializeTransactionThread()
+            {
+                _orderRequestQueues = new() { new BusyCollection<OrderRequest>() };
+            }
         }
     }
 }

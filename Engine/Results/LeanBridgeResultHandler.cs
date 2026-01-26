@@ -16,9 +16,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using QuantConnect.Configuration;
+using QuantConnect.Brokerages;
 using QuantConnect.Orders;
+using QuantConnect.Lean.Engine.TransactionHandlers;
 
 namespace QuantConnect.Lean.Engine.Results
 {
@@ -128,21 +131,96 @@ namespace QuantConnect.Lean.Engine.Results
 
         private Dictionary<string, object> BuildAccountSummary(DateTime now)
         {
-            var items = new Dictionary<string, object>
-            {
-                ["NetLiquidation"] = Algorithm.Portfolio.TotalPortfolioValue,
-                ["TotalCashValue"] = Algorithm.Portfolio.Cash,
-                ["BuyingPower"] = Algorithm.Portfolio.MarginRemaining,
-                ["UnrealizedPnL"] = Algorithm.Portfolio.TotalUnrealizedProfit,
-                ["TotalHoldingsValue"] = Algorithm.Portfolio.TotalHoldingsValue
-            };
+            var items = TryBuildIbAccountSummary();
+            var stale = items.Count == 0;
             return new Dictionary<string, object>
             {
                 ["items"] = items,
                 ["refreshed_at"] = now.ToString("O"),
                 ["source"] = "lean_bridge",
-                ["stale"] = false
+                ["source_detail"] = items.Count == 0 ? "ib_account_empty" : "ib_account_merge",
+                ["stale"] = stale
             };
+        }
+
+        private Dictionary<string, object> TryBuildIbAccountSummary()
+        {
+            if (TransactionHandler is not BrokerageTransactionHandler brokerageTransactionHandler)
+            {
+                return new Dictionary<string, object>();
+            }
+
+            if (brokerageTransactionHandler.Brokerage is not IAccountSummaryProvider accountSummaryProvider)
+            {
+                return new Dictionary<string, object>();
+            }
+
+            var snapshot = accountSummaryProvider.GetAccountSummarySnapshot();
+            if (snapshot == null || snapshot.Count == 0)
+            {
+                return new Dictionary<string, object>();
+            }
+
+            var items = new Dictionary<string, object>();
+            foreach (var tag in new[]
+            {
+                "NetLiquidation",
+                "TotalCashValue",
+                "AvailableFunds",
+                "BuyingPower",
+                "UnrealizedPnL",
+                "TotalHoldingsValue",
+                "CashBalance",
+                "EquityWithLoanValue",
+                "GrossPositionValue",
+                "InitMarginReq",
+                "MaintMarginReq"
+            })
+            {
+                if (TryGetSnapshotValue(snapshot, "BASE", tag, out var value)
+                    || TryGetSnapshotValueAnyCurrency(snapshot, tag, out value))
+                {
+                    items[tag] = ParseSnapshotValue(value);
+                }
+            }
+            return items;
+        }
+
+        private static object ParseSnapshotValue(string value)
+        {
+            if (decimal.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+            {
+                return parsed;
+            }
+            return value;
+        }
+
+        private static bool TryGetSnapshotValue(
+            Dictionary<string, string> snapshot,
+            string currency,
+            string tag,
+            out string value)
+        {
+            if (snapshot.TryGetValue($"{currency}:{tag}", out value))
+            {
+                return !string.IsNullOrEmpty(value);
+            }
+            value = null;
+            return false;
+        }
+
+        private static bool TryGetSnapshotValueAnyCurrency(Dictionary<string, string> snapshot, string tag, out string value)
+        {
+            foreach (var entry in snapshot)
+            {
+                if (entry.Key.EndsWith($":{tag}", StringComparison.Ordinal))
+                {
+                    value = entry.Value;
+                    return !string.IsNullOrEmpty(value);
+                }
+            }
+            value = null;
+            return false;
         }
 
         private Dictionary<string, object> BuildPositions(DateTime now)
@@ -158,7 +236,7 @@ namespace QuantConnect.Lean.Engine.Results
                     ["quantity"] = holding.Quantity,
                     ["avg_cost"] = holding.AveragePrice,
                     ["market_value"] = holding.MarketValue,
-                    ["unrealized_pnl"] = holding.UnrealizedProfit,
+                    ["unrealized_pnl"] = holding.UnrealizedPnL,
                     ["currency"] = holding.CurrencySymbol
                 });
             }
@@ -183,7 +261,7 @@ namespace QuantConnect.Lean.Engine.Results
                     ["bid"] = security.BidPrice,
                     ["ask"] = security.AskPrice,
                     ["last"] = security.Price,
-                    ["timestamp"] = security.Time.ToUniversalTime().ToString("O")
+                    ["timestamp"] = Algorithm.UtcTime.ToString("O")
                 });
             }
             return new Dictionary<string, object>
