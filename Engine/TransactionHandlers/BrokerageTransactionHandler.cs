@@ -128,6 +128,11 @@ namespace QuantConnect.Lean.Engine.TransactionHandlers
         public IEnumerable<OrderEvent> OrderEvents => _orderEvents;
 
         /// <summary>
+        /// Gets the brokerage instance used by this transaction handler.
+        /// </summary>
+        public IBrokerage Brokerage => _brokerage;
+
+        /// <summary>
         /// Gets the permanent storage for all order tickets
         /// </summary>
         public ConcurrentDictionary<int, OrderTicket> OrderTickets
@@ -1953,4 +1958,3 @@ namespace QuantConnect.Lean.Engine.TransactionHandlers
         }
     }
 }
-
