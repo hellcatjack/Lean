@@ -16,6 +16,7 @@
 
 using NUnit.Framework;
 using Python.Runtime;
+using QuantConnect.Configuration;
 using QuantConnect.Python;
 using QuantConnect.Securities;
 using QuantConnect.Util;
@@ -307,6 +308,22 @@ def Test(df, other, symbol):
 
         private static Dictionary<string, TestCaseData[]> GetParameterlessFunctions()
         {
+            var disablePython = Environment.GetEnvironmentVariable("LEAN_DISABLE_PYTHON");
+            if (Config.GetBool("lean-disable-python")
+                || string.Equals(disablePython, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(disablePython, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                return new Dictionary<string, TestCaseData[]>
+                {
+                    ["DataFrame"] = Array.Empty<TestCaseData>(),
+                    ["Series"] = Array.Empty<TestCaseData>(),
+                    ["DataFrameParameterless"] = Array.Empty<TestCaseData>(),
+                    ["SeriesParameterless"] = Array.Empty<TestCaseData>(),
+                    ["DataFrameOtherParameter"] = Array.Empty<TestCaseData>(),
+                    ["SeriesOtherParameter"] = Array.Empty<TestCaseData>()
+                };
+            }
+
             // Initialize the Python engine and begin allow thread
             PythonInitializer.Initialize();
 

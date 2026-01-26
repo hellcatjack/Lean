@@ -42,6 +42,14 @@ namespace QuantConnect.Tests
         {
             TryAddIconicDataSubTypes();
             AdjustCurrentDirectory();
+            var disablePython = Environment.GetEnvironmentVariable("LEAN_DISABLE_PYTHON");
+            if (Config.GetBool("lean-disable-python")
+                || string.Equals(disablePython, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(disablePython, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Trace("AssemblyInitialize.InitializeTestEnvironment(): skipping TestGlobals.Initialize because python is disabled.");
+                return;
+            }
             TestGlobals.Initialize();
         }
 
@@ -61,6 +69,21 @@ namespace QuantConnect.Tests
             Globals.Reset();
 
             Log.DebuggingEnabled = Config.GetBool("debug-mode");
+            var dataFolderOverride = Environment.GetEnvironmentVariable("LEAN_DATA_FOLDER");
+            if (!string.IsNullOrWhiteSpace(dataFolderOverride))
+            {
+                Config.Set("data-folder", dataFolderOverride);
+                Globals.Reset();
+            }
+            var disablePython = Environment.GetEnvironmentVariable("LEAN_DISABLE_PYTHON");
+            if (Config.GetBool("lean-disable-python")
+                || string.Equals(disablePython, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(disablePython, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Trace("AssemblyInitialize.AdjustCurrentDirectory(): Python initialization disabled.");
+                return;
+            }
+
             // Activate virtual environment if defined
             PythonInitializer.ActivatePythonVirtualEnvironment(Config.Get("python-venv"));
 
@@ -154,5 +177,3 @@ namespace QuantConnect.Tests
         }
     }
 }
-
-

@@ -27,6 +27,26 @@ namespace QuantConnect.Tests.Common.Python
     public class PythonInitializerTests
     {
         [Test]
+        public void InitializeHonorsDisableFlag()
+        {
+            var previous = System.Environment.GetEnvironmentVariable("LEAN_DISABLE_PYTHON");
+            try
+            {
+                System.Environment.SetEnvironmentVariable("LEAN_DISABLE_PYTHON", "1");
+                var field = typeof(PythonInitializer).GetField("_isInitialized", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                Assert.IsNotNull(field, "Expected _isInitialized field to exist");
+                var wasInitialized = (bool)field.GetValue(null);
+                PythonInitializer.Initialize();
+                Assert.AreEqual(wasInitialized, (bool)field.GetValue(null));
+            }
+            finally
+            {
+                PythonInitializer.Shutdown();
+                System.Environment.SetEnvironmentVariable("LEAN_DISABLE_PYTHON", previous);
+            }
+        }
+
+        [Test]
         public void AlgorithmLocationIsAlwaysBeforeOtherPaths()
         {
             PythonInitializer.Initialize();

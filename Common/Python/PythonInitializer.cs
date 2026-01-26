@@ -50,6 +50,21 @@ namespace QuantConnect.Python
         /// </summary>
         public static void Initialize(bool beginAllowThreads = true)
         {
+            var disablePython = Environment.GetEnvironmentVariable("LEAN_DISABLE_PYTHON");
+            if (Config.GetBool("lean-disable-python")
+                || string.Equals(disablePython, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(disablePython, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Trace("PythonInitializer.Initialize(): disabled via configuration.");
+                var trace = Environment.GetEnvironmentVariable("LEAN_DISABLE_PYTHON_TRACE");
+                if (string.Equals(trace, "1", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(trace, "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.Trace($"PythonInitializer.Initialize(): call stack (disabled) -> {Environment.StackTrace}");
+                }
+                return;
+            }
+
             if (!_isInitialized)
             {
                 Log.Trace($"PythonInitializer.Initialize(): {Messages.PythonInitializer.Start}...");
