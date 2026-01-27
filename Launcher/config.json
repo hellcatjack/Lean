@@ -29,7 +29,7 @@
   "debugging-method": "LocalCmdline",
 
   // location of a python virtual env to use libraries from
-  //"python-venv": "/venv",
+  "python-venv": "/app/stocklean/.venv",
 
   // handlers
   "log-handler": "QuantConnect.Logging.CompositeLogHandler",

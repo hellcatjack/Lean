@@ -41,6 +41,7 @@
 # Include docker launch scripts for Mac/Linux
 !run_docker.sh
 !research/run_docker_notebook.sh
+!scripts/run-lean-tests.sh
 
 # QC Config Files:
 # config.json

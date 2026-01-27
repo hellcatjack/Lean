@@ -33,6 +33,7 @@ namespace QuantConnect.Algorithm.CSharp
 
         public class IntentItem
         {
+            public string OrderIntentId { get; set; }
             public string Symbol { get; set; }
             public decimal Quantity { get; set; }
             public decimal Weight { get; set; }
@@ -40,6 +41,7 @@ namespace QuantConnect.Algorithm.CSharp
 
         public class ExecutionRequest
         {
+            public string OrderIntentId { get; set; }
             public string Symbol { get; set; }
             public decimal Quantity { get; set; }
             public decimal Weight { get; set; }
@@ -68,6 +70,7 @@ namespace QuantConnect.Algorithm.CSharp
 
                         items.Add(new IntentItem
                         {
+                            OrderIntentId = obj.Value<string>("order_intent_id"),
                             Symbol = obj.Value<string>("symbol"),
                             Quantity = obj.Value<decimal?>("quantity") ?? 0m,
                             Weight = obj.Value<decimal?>("weight") ?? 0m
@@ -108,6 +111,7 @@ namespace QuantConnect.Algorithm.CSharp
                 {
                     requests.Add(new ExecutionRequest
                     {
+                        OrderIntentId = item.OrderIntentId,
                         Symbol = symbol,
                         Quantity = item.Quantity,
                         Weight = 0m,
@@ -120,6 +124,7 @@ namespace QuantConnect.Algorithm.CSharp
                 {
                     requests.Add(new ExecutionRequest
                     {
+                        OrderIntentId = item.OrderIntentId,
                         Symbol = symbol,
                         Quantity = 0m,
                         Weight = item.Weight,
@@ -155,13 +160,18 @@ namespace QuantConnect.Algorithm.CSharp
 
             foreach (var request in _requests)
             {
+                if (string.IsNullOrWhiteSpace(request.OrderIntentId))
+                {
+                    Log($"LEAN_BRIDGE_SKIP: missing order_intent_id for {request.Symbol}");
+                    continue;
+                }
                 if (request.UseQuantity)
                 {
-                    MarketOrder(request.Symbol, request.Quantity);
+                    MarketOrder(request.Symbol, request.Quantity, tag: request.OrderIntentId);
                     continue;
                 }
 
-                SetHoldings(request.Symbol, request.Weight);
+                SetHoldings(request.Symbol, request.Weight, tag: request.OrderIntentId);
             }
 
             _executed = true;

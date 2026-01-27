@@ -16,6 +16,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using NUnit.Framework;
 using NUnit.Framework.Interfaces;
 using ProtoBuf.Meta;
@@ -84,6 +85,8 @@ namespace QuantConnect.Tests
                 return;
             }
 
+            EnsurePythonNetRuntime(Config.Get("python-venv"));
+
             // Activate virtual environment if defined
             PythonInitializer.ActivatePythonVirtualEnvironment(Config.Get("python-venv"));
 
@@ -106,6 +109,68 @@ namespace QuantConnect.Tests
                 "../../../Algorithm.Framework/Selection",
                 "../../../Algorithm.Python"
                 });
+        }
+
+        private static void EnsurePythonNetRuntime(string pythonVenv)
+        {
+            if (string.IsNullOrWhiteSpace(pythonVenv))
+            {
+                var fallbackVenv = "/app/stocklean/.venv";
+                if (Directory.Exists(fallbackVenv))
+                {
+                    pythonVenv = fallbackVenv;
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            var existingDll = Environment.GetEnvironmentVariable("PYTHONNET_PYDLL");
+            if (!string.IsNullOrWhiteSpace(existingDll))
+            {
+                return;
+            }
+
+            try
+            {
+                var libDir = pythonVenv;
+                var pattern = "python*.dll";
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                {
+                    libDir = Path.Combine(pythonVenv, "lib");
+                    pattern = "libpython*.dylib";
+                }
+                else if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    libDir = Path.Combine(pythonVenv, "lib");
+                    pattern = "libpython*.so*";
+                }
+
+                var candidates = Directory.Exists(libDir)
+                    ? Directory.GetFiles(libDir, pattern, SearchOption.TopDirectoryOnly)
+                    : Array.Empty<string>();
+                Array.Sort(candidates, StringComparer.OrdinalIgnoreCase);
+                var dllPath = candidates.Length > 0 ? candidates[^1] : null;
+                if (!string.IsNullOrWhiteSpace(dllPath))
+                {
+                    Environment.SetEnvironmentVariable("PYTHONNET_PYDLL", dllPath);
+                }
+
+                if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PYTHONHOME")))
+                {
+                    Environment.SetEnvironmentVariable("PYTHONHOME", pythonVenv);
+                }
+
+                if (!string.IsNullOrWhiteSpace(dllPath))
+                {
+                    Log.Trace($"AssemblyInitialize.EnsurePythonNetRuntime(): PYTHONNET_PYDLL set to {dllPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex);
+            }
         }
 
         private static void TryAddIconicDataSubTypes()

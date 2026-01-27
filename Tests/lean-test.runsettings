@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <RunConfiguration>
+    <EnvironmentVariables>
+      <PYTHONNET_PYDLL>/app/stocklean/.venv/lib/libpython3.11.so</PYTHONNET_PYDLL>
+      <PYTHONHOME>/app/stocklean/.venv</PYTHONHOME>
+    </EnvironmentVariables>
+  </RunConfiguration>
+</RunSettings>

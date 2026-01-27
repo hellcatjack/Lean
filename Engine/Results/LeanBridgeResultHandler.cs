@@ -110,6 +110,12 @@ namespace QuantConnect.Lean.Engine.Results
         {
             try
             {
+                string tag = null;
+                if (TransactionHandler?.Orders != null
+                    && TransactionHandler.Orders.TryGetValue(newEvent.OrderId, out var order))
+                {
+                    tag = order.Tag;
+                }
                 _writer.AppendJsonLine("execution_events.jsonl", new Dictionary<string, object>
                 {
                     ["order_id"] = newEvent.OrderId,
@@ -118,7 +124,8 @@ namespace QuantConnect.Lean.Engine.Results
                     ["filled"] = newEvent.FillQuantity,
                     ["fill_price"] = newEvent.FillPrice,
                     ["direction"] = newEvent.Direction.ToString(),
-                    ["time"] = newEvent.UtcTime.ToString("O")
+                    ["time"] = newEvent.UtcTime.ToString("O"),
+                    ["tag"] = tag
                 });
             }
             catch (Exception ex)

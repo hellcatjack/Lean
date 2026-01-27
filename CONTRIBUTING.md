@@ -20,6 +20,22 @@ As a point of consistency, we use soft tabs of four spaces to ensure files rende
 
 All pull requests must be accompanied by units tests. If it is a new feature, the tests should highlight expected use cases as well as edge cases, if applicable. If it is a bugfix, there should be tests that expose the bug in question.
 
+### Running Tests (Python-enabled)
+
+Lean tests that initialize Python require the runsettings file to provide a stable Python runtime configuration.
+
+Use the helper script:
+
+```bash
+./scripts/run-lean-tests.sh --filter "FullyQualifiedName~LeanBridgeExecutionAlgorithmTests"
+```
+
+Or call `dotnet test` directly:
+
+```bash
+dotnet test Tests/QuantConnect.Tests.csproj --settings Tests/lean-test.runsettings --filter "FullyQualifiedName~LeanBridgeExecutionAlgorithmTests"
+```
+
 ## Guidelines for Framework Modules Contributions
 
 Contributions of [Algorithm Framework](https://www.quantconnect.com/docs/algorithm-framework/overview) Modules needs to follow certain extra patterns, since QuantConnect users can use them in their algorithms.
