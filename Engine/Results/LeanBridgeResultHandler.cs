@@ -232,26 +232,53 @@ namespace QuantConnect.Lean.Engine.Results
 
         private Dictionary<string, object> BuildPositions(DateTime now)
         {
-            var holdings = GetHoldings(Algorithm.Securities.Values, Algorithm.SubscriptionManager.SubscriptionDataConfigService, onlyInvested: true);
             var list = new List<Dictionary<string, object>>();
-            foreach (var entry in holdings)
+            var sourceDetail = "algorithm_holdings";
+
+            if (TransactionHandler is BrokerageTransactionHandler brokerageTransactionHandler)
             {
-                var holding = entry.Value;
-                list.Add(new Dictionary<string, object>
+                var brokerageHoldings = brokerageTransactionHandler.Brokerage?.GetAccountHoldings();
+                if (brokerageHoldings != null && brokerageHoldings.Count > 0)
                 {
-                    ["symbol"] = holding.Symbol.Value,
-                    ["quantity"] = holding.Quantity,
-                    ["avg_cost"] = holding.AveragePrice,
-                    ["market_value"] = holding.MarketValue,
-                    ["unrealized_pnl"] = holding.UnrealizedPnL,
-                    ["currency"] = holding.CurrencySymbol
-                });
+                    sourceDetail = "ib_holdings";
+                    foreach (var holding in brokerageHoldings)
+                    {
+                        list.Add(new Dictionary<string, object>
+                        {
+                            ["symbol"] = holding.Symbol.Value,
+                            ["quantity"] = holding.Quantity,
+                            ["avg_cost"] = holding.AveragePrice,
+                            ["market_value"] = holding.MarketValue,
+                            ["unrealized_pnl"] = holding.UnrealizedPnL,
+                            ["currency"] = holding.CurrencySymbol
+                        });
+                    }
+                }
+            }
+
+            if (list.Count == 0)
+            {
+                var holdings = GetHoldings(Algorithm.Securities.Values, Algorithm.SubscriptionManager.SubscriptionDataConfigService, onlyInvested: true);
+                foreach (var entry in holdings)
+                {
+                    var holding = entry.Value;
+                    list.Add(new Dictionary<string, object>
+                    {
+                        ["symbol"] = holding.Symbol.Value,
+                        ["quantity"] = holding.Quantity,
+                        ["avg_cost"] = holding.AveragePrice,
+                        ["market_value"] = holding.MarketValue,
+                        ["unrealized_pnl"] = holding.UnrealizedPnL,
+                        ["currency"] = holding.CurrencySymbol
+                    });
+                }
             }
             return new Dictionary<string, object>
             {
                 ["items"] = list,
                 ["refreshed_at"] = now.ToString("O"),
                 ["source"] = "lean_bridge",
+                ["source_detail"] = sourceDetail,
                 ["stale"] = false
             };
         }

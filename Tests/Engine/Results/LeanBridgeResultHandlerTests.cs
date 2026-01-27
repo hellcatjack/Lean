@@ -15,11 +15,15 @@
 */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
+using Moq;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
+using QuantConnect;
 using QuantConnect.Configuration;
 using QuantConnect.Brokerages.InteractiveBrokers;
+using QuantConnect.Interfaces;
 using QuantConnect.Lean.Engine.Results;
 using QuantConnect.Lean.Engine.TransactionHandlers;
 using QuantConnect.Messaging;
@@ -151,6 +155,47 @@ namespace QuantConnect.Tests.Engine.Results
             Assert.IsTrue(json["items"].HasValues == false);
             Assert.IsTrue(json["stale"].Value<bool>());
             Assert.AreEqual("ib_account_empty", (string)json["source_detail"]);
+        }
+
+        [Test]
+        public void BuildPositionsUsesBrokerageHoldingsWhenAvailable()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            Config.Set("lean-bridge-output-dir", dir);
+            Config.Set("lean-bridge-snapshot-seconds", "0");
+            Config.Set("lean-bridge-heartbeat-seconds", "0");
+
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            var api = new QuantConnect.Api.Api();
+            var transactionHandler = new TestBrokerageTransactionHandler();
+            var handler = new LeanBridgeResultHandler();
+            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
+
+            var algorithm = new AlgorithmStub();
+            algorithm.SetFinishedWarmingUp();
+            algorithm.AddEquity("AAPL").Holdings.SetHoldings(1, 10);
+            handler.SetAlgorithm(algorithm, 100000);
+
+            var ibHolding = new Holding
+            {
+                Symbol = Symbols.SPY,
+                Quantity = 2,
+                AveragePrice = 100m,
+                MarketValue = 200m,
+                UnrealizedPnL = 0m,
+                CurrencySymbol = "$"
+            };
+
+            var brokerage = new Mock<IBrokerage>();
+            brokerage.SetupGet(x => x.IsConnected).Returns(true);
+            brokerage.Setup(x => x.GetAccountHoldings()).Returns(new List<Holding> { ibHolding });
+            transactionHandler.Initialize(algorithm, brokerage.Object, handler);
+
+            handler.ProcessSynchronousEvents(true);
+
+            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "positions.json")));
+            Assert.AreEqual("ib_holdings", (string)json["source_detail"]);
+            Assert.AreEqual("SPY", (string)json["items"]?[0]?["symbol"]);
         }
 
         private class TestBrokerageTransactionHandler : BrokerageTransactionHandler
