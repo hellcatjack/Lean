@@ -107,7 +107,7 @@ namespace QuantConnect.Algorithm.CSharp
                     continue;
                 }
 
-                if (item.Quantity > 0)
+                if (item.Quantity != 0)
                 {
                     requests.Add(new ExecutionRequest
                     {

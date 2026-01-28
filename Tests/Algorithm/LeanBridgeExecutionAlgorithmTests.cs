@@ -49,5 +49,29 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual(0m, requests[0].Weight);
             Assert.IsTrue(requests[0].UseQuantity);
         }
+
+        [Test]
+        public void QuantitySupportsNegativeSell()
+        {
+            var items = new[]
+            {
+                new LeanBridgeExecutionAlgorithm.IntentItem
+                {
+                    OrderIntentId = "oi_3_1",
+                    Symbol = "AAPL",
+                    Quantity = -2m,
+                    Weight = 0m
+                }
+            };
+
+            var requests = LeanBridgeExecutionAlgorithm.BuildRequests(items);
+
+            Assert.AreEqual(1, requests.Count);
+            Assert.AreEqual("oi_3_1", requests[0].OrderIntentId);
+            Assert.AreEqual("AAPL", requests[0].Symbol);
+            Assert.AreEqual(-2m, requests[0].Quantity);
+            Assert.AreEqual(0m, requests[0].Weight);
+            Assert.IsTrue(requests[0].UseQuantity);
+        }
     }
 }

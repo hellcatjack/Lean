@@ -1,0 +1,49 @@
+{
+  "algorithm-language": "CSharp",
+  "algorithm-location": "/app/stocklean/Lean_git/Algorithm.CSharp/bin/Release/QuantConnect.Algorithm.CSharp.dll",
+  "algorithm-type-name": "LeanBridgeExecutionAlgorithm",
+  "api-handler": "QuantConnect.Api.Api",
+  "brokerage": "InteractiveBrokersBrokerage",
+  "data-aggregator": "QuantConnect.Lean.Engine.DataFeeds.AggregationManager",
+  "data-channel-provider": "DataChannelProvider",
+  "data-folder": "/data/share/stock/data/lean",
+  "data-provider": "QuantConnect.Lean.Engine.DataFeeds.DefaultDataProvider",
+  "environment": "live-interactive",
+  "environments": {
+    "live-interactive": {
+      "data-feed-handler": "QuantConnect.Lean.Engine.DataFeeds.LiveTradingDataFeed",
+      "data-queue-handler": [
+        "InteractiveBrokersBrokerage"
+      ],
+      "history-provider": [
+        "BrokerageHistoryProvider",
+        "SubscriptionDataReaderHistoryProvider"
+      ],
+      "live-mode": true,
+      "live-mode-brokerage": "InteractiveBrokersBrokerage",
+      "real-time-handler": "QuantConnect.Lean.Engine.RealTime.LiveTradingRealTimeHandler",
+      "result-handler": "QuantConnect.Lean.Engine.Results.LeanBridgeResultHandler",
+      "setup-handler": "QuantConnect.Lean.Engine.Setup.BrokerageSetupHandler",
+      "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BrokerageTransactionHandler"
+    }
+  },
+  "execution-intent-path": "/app/stocklean/artifacts/order_intents/order_intent_smoke.json",
+  "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider",
+  "force-exchange-always-open": true,
+  "ib-automater-enabled": false,
+  "ib-client-id": 105,
+  "ib-host": "192.168.1.31",
+  "ib-port": 7497,
+  "ib-trading-mode": "paper",
+  "ib-validate-subscription": false,
+  "job-queue-handler": "QuantConnect.Queues.JobQueue",
+  "lean-bridge-heartbeat-seconds": "2",
+  "lean-bridge-output-dir": "/data/share/stock/data/lean_bridge",
+  "lean-bridge-watchlist-path": "/data/share/stock/data/lean_bridge/watchlist.json",
+  "lean-bridge-watchlist-refresh-seconds": "5",
+  "lean-bridge-snapshot-seconds": "2",
+  "log-handler": "QuantConnect.Logging.CompositeLogHandler",
+  "map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
+  "messaging-handler": "QuantConnect.Messaging.Messaging",
+  "object-store": "QuantConnect.Lean.Engine.Storage.LocalObjectStore"
+}
