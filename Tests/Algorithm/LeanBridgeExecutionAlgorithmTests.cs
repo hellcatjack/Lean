@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using NUnit.Framework;
 using QuantConnect.Algorithm.CSharp;
@@ -72,6 +73,72 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual(-2m, requests[0].Quantity);
             Assert.AreEqual(0m, requests[0].Weight);
             Assert.IsTrue(requests[0].UseQuantity);
+        }
+
+        [Test]
+        public void WeightSupportsNegativeSell()
+        {
+            var items = new[]
+            {
+                new LeanBridgeExecutionAlgorithm.IntentItem
+                {
+                    OrderIntentId = "oi_4_1",
+                    Symbol = "AAPL",
+                    Quantity = 0m,
+                    Weight = -0.25m
+                }
+            };
+
+            var requests = LeanBridgeExecutionAlgorithm.BuildRequests(items);
+
+            Assert.AreEqual(1, requests.Count);
+            Assert.AreEqual("oi_4_1", requests[0].OrderIntentId);
+            Assert.AreEqual("AAPL", requests[0].Symbol);
+            Assert.AreEqual(0m, requests[0].Quantity);
+            Assert.AreEqual(-0.25m, requests[0].Weight);
+            Assert.IsFalse(requests[0].UseQuantity);
+        }
+
+        [Test]
+        public void BuildsExecutionLogLines()
+        {
+            var requests = new List<LeanBridgeExecutionAlgorithm.ExecutionRequest>
+            {
+                new LeanBridgeExecutionAlgorithm.ExecutionRequest
+                {
+                    OrderIntentId = "direct:1",
+                    Symbol = "AAPL",
+                    Quantity = -1m,
+                    Weight = 0m,
+                    UseQuantity = true
+                }
+            };
+
+            var lines = LeanBridgeExecutionAlgorithm.BuildExecutionLogLines("/tmp/intent.json", requests);
+
+            Assert.IsNotEmpty(lines);
+            Assert.That(lines[0], Does.Contain("LEAN_BRIDGE_INTENT"));
+            Assert.That(lines[0], Does.Contain("/tmp/intent.json"));
+            Assert.That(lines[0], Does.Contain("requests=1"));
+            Assert.That(lines[1], Does.Contain("direct:1"));
+            Assert.That(lines[1], Does.Contain("AAPL"));
+            Assert.That(lines[1], Does.Contain("quantity=-1"));
+        }
+
+        [Test]
+        public void DetectsAllIntentOrdersFilled()
+        {
+            var intentOrders = new Dictionary<string, HashSet<int>>
+            {
+                { "direct:1", new HashSet<int> { 10, 11 } },
+                { "direct:2", new HashSet<int> { 12 } }
+            };
+            var filledOrderIds = new HashSet<int> { 10, 11, 12 };
+
+            Assert.IsTrue(LeanBridgeExecutionAlgorithm.AreAllIntentOrdersFilled(intentOrders, filledOrderIds));
+
+            filledOrderIds.Remove(11);
+            Assert.IsFalse(LeanBridgeExecutionAlgorithm.AreAllIntentOrdersFilled(intentOrders, filledOrderIds));
         }
     }
 }

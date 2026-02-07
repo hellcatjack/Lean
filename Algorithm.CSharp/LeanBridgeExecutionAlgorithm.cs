@@ -14,12 +14,15 @@
 */
 
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using Newtonsoft.Json.Linq;
 using QuantConnect;
 using QuantConnect.Algorithm;
 using QuantConnect.Configuration;
 using QuantConnect.Data;
+using QuantConnect.Interfaces;
+using QuantConnect.Orders;
 
 namespace QuantConnect.Algorithm.CSharp
 {
@@ -29,7 +32,19 @@ namespace QuantConnect.Algorithm.CSharp
     public class LeanBridgeExecutionAlgorithm : QCAlgorithm
     {
         private bool _executed;
+        private bool _exitRequested;
+        private ExecutionParams _executionParams = new();
         private List<ExecutionRequest> _requests = new();
+        private readonly Dictionary<int, string> _orderIdToIntent = new();
+        private readonly Dictionary<string, HashSet<int>> _intentToOrderIds = new();
+        private readonly HashSet<int> _filledOrderIds = new();
+
+        private class ExecutionParams
+        {
+            public int MinQty { get; set; } = 1;
+            public int LotSize { get; set; } = 1;
+            public decimal CashBufferRatio { get; set; } = 0m;
+        }
 
         public class IntentItem
         {
@@ -37,6 +52,10 @@ namespace QuantConnect.Algorithm.CSharp
             public string Symbol { get; set; }
             public decimal Quantity { get; set; }
             public decimal Weight { get; set; }
+            public string OrderType { get; set; }
+            public decimal LimitPrice { get; set; }
+            public bool AllowOutsideRth { get; set; }
+            public string Session { get; set; }
         }
 
         public class ExecutionRequest
@@ -46,6 +65,73 @@ namespace QuantConnect.Algorithm.CSharp
             public decimal Quantity { get; set; }
             public decimal Weight { get; set; }
             public bool UseQuantity { get; set; }
+            public string OrderType { get; set; }
+            public decimal LimitPrice { get; set; }
+            public bool AllowOutsideRth { get; set; }
+            public string Session { get; set; }
+        }
+
+        private static ExecutionParams LoadExecutionParams(string path)
+        {
+            var result = new ExecutionParams();
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return result;
+            }
+
+            try
+            {
+                var token = JToken.Parse(File.ReadAllText(path));
+                if (token is not JObject obj)
+                {
+                    return result;
+                }
+
+                var minQty = obj.Value<int?>("min_qty") ?? obj.Value<int?>("minQty");
+                if (minQty.HasValue && minQty.Value > 0)
+                {
+                    result.MinQty = minQty.Value;
+                }
+
+                var lotSize = obj.Value<int?>("lot_size") ?? obj.Value<int?>("lotSize");
+                if (lotSize.HasValue && lotSize.Value > 0)
+                {
+                    result.LotSize = lotSize.Value;
+                }
+
+                var cashBufferRatio = obj.Value<decimal?>("cash_buffer_ratio") ?? obj.Value<decimal?>("cashBufferRatio");
+                if (cashBufferRatio.HasValue)
+                {
+                    var value = cashBufferRatio.Value;
+                    if (value < 0m) value = 0m;
+                    if (value > 1m) value = 1m;
+                    result.CashBufferRatio = value;
+                }
+            }
+            catch
+            {
+                return result;
+            }
+
+            return result;
+        }
+
+        private static int ApplyExecutionConstraints(decimal rawQty, int lotSize, int minQty)
+        {
+            var lot = lotSize > 0 ? lotSize : 1;
+            var minQtyValue = minQty > 0 ? minQty : 1;
+            if (minQtyValue % lot != 0)
+            {
+                minQtyValue = (int)System.Math.Ceiling((decimal)minQtyValue / lot) * lot;
+            }
+
+            var qty = (int)System.Math.Ceiling(rawQty / lot) * lot;
+            if (qty < minQtyValue)
+            {
+                qty = minQtyValue;
+            }
+
+            return qty < 0 ? 0 : qty;
         }
 
         public static List<IntentItem> LoadIntentItems(string path)
@@ -73,7 +159,20 @@ namespace QuantConnect.Algorithm.CSharp
                             OrderIntentId = obj.Value<string>("order_intent_id"),
                             Symbol = obj.Value<string>("symbol"),
                             Quantity = obj.Value<decimal?>("quantity") ?? 0m,
-                            Weight = obj.Value<decimal?>("weight") ?? 0m
+                            Weight = obj.Value<decimal?>("weight") ?? 0m,
+                            OrderType = obj.Value<string>("order_type") ?? obj.Value<string>("orderType") ?? string.Empty,
+                            LimitPrice = obj.Value<decimal?>("limit_price") ?? obj.Value<decimal?>("limitPrice") ?? 0m,
+                            AllowOutsideRth =
+                                obj.Value<bool?>("outside_rth")
+                                ?? obj.Value<bool?>("allow_outside_rth")
+                                ?? obj.Value<bool?>("outside_regular_trading_hours")
+                                ?? obj.Value<bool?>("outsideRegularTradingHours")
+                                ?? false,
+                            Session =
+                                obj.Value<string>("session")
+                                ?? obj.Value<string>("trading_session")
+                                ?? obj.Value<string>("execution_session")
+                                ?? string.Empty
                         });
                     }
                 }
@@ -115,12 +214,16 @@ namespace QuantConnect.Algorithm.CSharp
                         Symbol = symbol,
                         Quantity = item.Quantity,
                         Weight = 0m,
-                        UseQuantity = true
+                        UseQuantity = true,
+                        OrderType = item.OrderType,
+                        LimitPrice = item.LimitPrice,
+                        AllowOutsideRth = item.AllowOutsideRth,
+                        Session = item.Session
                     });
                     continue;
                 }
 
-                if (item.Weight > 0)
+                if (item.Weight != 0m)
                 {
                     requests.Add(new ExecutionRequest
                     {
@@ -128,12 +231,73 @@ namespace QuantConnect.Algorithm.CSharp
                         Symbol = symbol,
                         Quantity = 0m,
                         Weight = item.Weight,
-                        UseQuantity = false
+                        UseQuantity = false,
+                        OrderType = item.OrderType,
+                        LimitPrice = item.LimitPrice,
+                        AllowOutsideRth = item.AllowOutsideRth,
+                        Session = item.Session
                     });
                 }
             }
 
             return requests;
+        }
+
+        public static List<string> BuildExecutionLogLines(string intentPath, List<ExecutionRequest> requests)
+        {
+            var lines = new List<string>();
+            var safePath = string.IsNullOrWhiteSpace(intentPath) ? "<empty>" : intentPath.Trim();
+            var requestCount = requests?.Count ?? 0;
+            lines.Add($"LEAN_BRIDGE_INTENT: path={safePath} requests={requestCount}");
+
+            if (requests == null)
+            {
+                return lines;
+            }
+
+            foreach (var request in requests)
+            {
+                if (request == null)
+                {
+                    continue;
+                }
+
+                var quantity = request.Quantity.ToString(CultureInfo.InvariantCulture);
+                var weight = request.Weight.ToString(CultureInfo.InvariantCulture);
+                var orderType = string.IsNullOrWhiteSpace(request.OrderType) ? "MKT" : request.OrderType.Trim();
+                var limitPrice = request.LimitPrice.ToString(CultureInfo.InvariantCulture);
+                var outsideRth = request.AllowOutsideRth.ToString().ToLowerInvariant();
+                var session = string.IsNullOrWhiteSpace(request.Session) ? "-" : request.Session.Trim();
+                lines.Add($"LEAN_BRIDGE_REQUEST: id={request.OrderIntentId} symbol={request.Symbol} quantity={quantity} weight={weight} useQuantity={request.UseQuantity.ToString().ToLowerInvariant()} orderType={orderType} limitPrice={limitPrice} outsideRth={outsideRth} session={session}");
+            }
+
+            return lines;
+        }
+
+        public static bool AreAllIntentOrdersFilled(Dictionary<string, HashSet<int>> intentOrders, HashSet<int> filledOrderIds)
+        {
+            if (intentOrders == null || intentOrders.Count == 0)
+            {
+                return true;
+            }
+
+            foreach (var orders in intentOrders.Values)
+            {
+                if (orders == null)
+                {
+                    continue;
+                }
+
+                foreach (var orderId in orders)
+                {
+                    if (filledOrderIds == null || !filledOrderIds.Contains(orderId))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         public override void Initialize()
@@ -142,22 +306,47 @@ namespace QuantConnect.Algorithm.CSharp
             SetBenchmark(x => 0m);
 
             var intentPath = Config.Get("execution-intent-path", string.Empty);
+            var paramsPath = Config.Get("execution-params-path", string.Empty);
             var items = LoadIntentItems(intentPath);
             _requests = BuildRequests(items);
+            _executionParams = LoadExecutionParams(paramsPath);
+
+            foreach (var line in BuildExecutionLogLines(intentPath, _requests))
+            {
+                Log(line);
+            }
 
             foreach (var request in _requests)
             {
-                AddEquity(request.Symbol, Resolution.Minute);
+                AddEquity(request.Symbol, Resolution.Minute, extendedMarketHours: true);
             }
         }
 
         public override void OnData(Slice data)
         {
-            if (_executed || _requests.Count == 0)
+            if (_executed)
             {
                 return;
             }
 
+            if (_requests.Count == 0)
+            {
+                _executed = true;
+                Log("LEAN_BRIDGE_NO_REQUESTS");
+                RequestExit("no_requests");
+                return;
+            }
+
+            var portfolioValue = Portfolio?.TotalPortfolioValue ?? 0m;
+            if (portfolioValue <= 0m)
+            {
+                Log("LEAN_BRIDGE_WAIT_PORTFOLIO");
+                return;
+            }
+
+            var effectiveValue = portfolioValue * (1m - _executionParams.CashBufferRatio);
+            var submittedOrders = 0;
+            var submittedIntents = 0;
             foreach (var request in _requests)
             {
                 if (string.IsNullOrWhiteSpace(request.OrderIntentId))
@@ -165,17 +354,168 @@ namespace QuantConnect.Algorithm.CSharp
                     Log($"LEAN_BRIDGE_SKIP: missing order_intent_id for {request.Symbol}");
                     continue;
                 }
-                if (request.UseQuantity)
+                var intentId = request.OrderIntentId.Trim();
+                var weight = request.Weight.ToString(CultureInfo.InvariantCulture);
+                var orderType = string.IsNullOrWhiteSpace(request.OrderType) ? "MKT" : request.OrderType.Trim().ToUpperInvariant();
+                if (orderType == "LIMIT")
                 {
-                    MarketOrder(request.Symbol, request.Quantity, tag: request.OrderIntentId);
+                    orderType = "LMT";
+                }
+                var limitPriceValue = request.LimitPrice;
+                if (limitPriceValue <= 0m && orderType == "LMT")
+                {
+                    try
+                    {
+                        limitPriceValue = Securities[request.Symbol].Price;
+                    }
+                    catch
+                    {
+                        limitPriceValue = 0m;
+                    }
+                }
+                var limitPrice = limitPriceValue.ToString(CultureInfo.InvariantCulture);
+                var outsideRth = request.AllowOutsideRth.ToString().ToLowerInvariant();
+                var session = string.IsNullOrWhiteSpace(request.Session) ? "-" : request.Session.Trim();
+                var computedQty = request.Quantity;
+                if (!request.UseQuantity)
+                {
+                    try
+                    {
+                        var price = Securities[request.Symbol].Price;
+                        if (price <= 0m)
+                        {
+                            Log($"LEAN_BRIDGE_WAIT_PRICE: id={intentId} symbol={request.Symbol}");
+                            return;
+                        }
+
+                        var rawQty = System.Math.Abs(request.Weight) * effectiveValue / price;
+                        var sizedQty = ApplyExecutionConstraints(rawQty, _executionParams.LotSize, _executionParams.MinQty);
+                        computedQty = request.Weight >= 0m ? sizedQty : -sizedQty;
+                    }
+                    catch
+                    {
+                        Log($"LEAN_BRIDGE_SKIP: price unavailable for {request.Symbol} (id={intentId})");
+                        continue;
+                    }
+                }
+                var quantity = computedQty.ToString(CultureInfo.InvariantCulture);
+                Log($"LEAN_BRIDGE_SUBMIT: id={intentId} symbol={request.Symbol} quantity={quantity} weight={weight} useQuantity={request.UseQuantity.ToString().ToLowerInvariant()} orderType={orderType} limitPrice={limitPrice} outsideRth={outsideRth} session={session}");
+                IOrderProperties orderProperties = null;
+                if (request.AllowOutsideRth)
+                {
+                    orderProperties = new InteractiveBrokersOrderProperties { OutsideRegularTradingHours = true };
+                }
+                if (computedQty == 0m)
+                {
+                    Log($"LEAN_BRIDGE_SKIP: computed quantity=0 for {request.Symbol} (id={intentId})");
                     continue;
                 }
 
-                SetHoldings(request.Symbol, request.Weight, tag: request.OrderIntentId);
+                OrderTicket ticket = null;
+                if (orderType == "LMT")
+                {
+                    if (limitPriceValue <= 0m)
+                    {
+                        Log($"LEAN_BRIDGE_SKIP: invalid limit price for {request.Symbol} (id={intentId})");
+                        continue;
+                    }
+                    ticket = LimitOrder(request.Symbol, computedQty, limitPriceValue, tag: intentId, orderProperties: orderProperties);
+                }
+                else
+                {
+                    ticket = MarketOrder(request.Symbol, computedQty, tag: intentId, orderProperties: orderProperties);
+                }
+
+                if (ticket != null)
+                {
+                    RegisterTicket(intentId, ticket);
+                    submittedOrders += 1;
+                    submittedIntents += 1;
+                }
             }
 
             _executed = true;
-            Log("EXECUTED_ONCE");
+            Log($"LEAN_BRIDGE_SUBMITTED: intents={submittedIntents} orders={submittedOrders}");
+
+            if (submittedOrders == 0)
+            {
+                Log("LEAN_BRIDGE_NO_ORDERS_SUBMITTED");
+                RequestExit("no_orders_submitted");
+            }
+        }
+
+        public override void OnOrderEvent(OrderEvent orderEvent)
+        {
+            if (orderEvent == null)
+            {
+                return;
+            }
+
+            Log($"LEAN_BRIDGE_ORDER_EVENT: orderId={orderEvent.OrderId} status={orderEvent.Status} fillQuantity={orderEvent.FillQuantity.ToString(CultureInfo.InvariantCulture)} symbol={orderEvent.Symbol}");
+
+            if (orderEvent.Status != OrderStatus.Filled)
+            {
+                return;
+            }
+
+            if (!_orderIdToIntent.TryGetValue(orderEvent.OrderId, out var intentId))
+            {
+                return;
+            }
+
+            _filledOrderIds.Add(orderEvent.OrderId);
+            Log($"LEAN_BRIDGE_FILL_TRACK: intent={intentId} filledOrders={_filledOrderIds.Count} totalOrders={_orderIdToIntent.Count}");
+
+            if (!_exitRequested && AreAllIntentOrdersFilled(_intentToOrderIds, _filledOrderIds))
+            {
+                Log($"LEAN_BRIDGE_ALL_FILLED: intents={_intentToOrderIds.Count} orders={_orderIdToIntent.Count}");
+                RequestExit("all_filled");
+            }
+        }
+
+        private int RegisterTickets(string intentId, IEnumerable<OrderTicket> tickets)
+        {
+            var count = 0;
+            if (tickets == null)
+            {
+                return count;
+            }
+
+            foreach (var ticket in tickets)
+            {
+                if (ticket == null)
+                {
+                    continue;
+                }
+
+                RegisterTicket(intentId, ticket);
+                count += 1;
+            }
+
+            return count;
+        }
+
+        private void RegisterTicket(string intentId, OrderTicket ticket)
+        {
+            _orderIdToIntent[ticket.OrderId] = intentId;
+            if (!_intentToOrderIds.TryGetValue(intentId, out var orderIds))
+            {
+                orderIds = new HashSet<int>();
+                _intentToOrderIds[intentId] = orderIds;
+            }
+
+            orderIds.Add(ticket.OrderId);
+        }
+
+        private void RequestExit(string reason)
+        {
+            if (_exitRequested)
+            {
+                return;
+            }
+
+            _exitRequested = true;
+            Quit(reason);
         }
     }
 }

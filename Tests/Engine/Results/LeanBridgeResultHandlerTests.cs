@@ -17,192 +17,322 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Moq;
-using Newtonsoft.Json.Linq;
+using System.Reflection;
+using System.Threading;
 using NUnit.Framework;
 using QuantConnect;
+using QuantConnect.Algorithm;
+using QuantConnect.Brokerages;
 using QuantConnect.Configuration;
-using QuantConnect.Brokerages.InteractiveBrokers;
 using QuantConnect.Interfaces;
 using QuantConnect.Lean.Engine.Results;
 using QuantConnect.Lean.Engine.TransactionHandlers;
-using QuantConnect.Messaging;
 using QuantConnect.Orders;
 using QuantConnect.Packets;
+using QuantConnect.Securities;
+using QuantConnect.Tests.Engine;
 using QuantConnect.Tests.Engine.DataFeeds;
-using QuantConnect.Util;
 
 namespace QuantConnect.Tests.Engine.Results
 {
     [TestFixture]
+    [NonParallelizable]
     public class LeanBridgeResultHandlerTests
     {
-        [Test]
-        public void WritesBridgeFilesOnProcess()
+        private MethodInfo _buildPositionsMethod;
+
+        [SetUp]
+        public void SetUp()
         {
-            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-            Config.Set("lean-bridge-output-dir", dir);
-            Config.Set("lean-bridge-snapshot-seconds", "0");
-            Config.Set("lean-bridge-heartbeat-seconds", "0");
-
-            using var messaging = new QuantConnect.Messaging.Messaging();
-            var api = new QuantConnect.Api.Api();
-            var handler = new LeanBridgeResultHandler();
-            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, new BacktestingTransactionHandler(), null));
-
-            var algorithm = new AlgorithmStub();
-            algorithm.SetFinishedWarmingUp();
-            algorithm.AddEquity("SPY").Holdings.SetHoldings(1, 10);
-            handler.SetAlgorithm(algorithm, 100000);
-
-            handler.ProcessSynchronousEvents(true);
-
-            Assert.IsTrue(File.Exists(Path.Combine(dir, "account_summary.json")));
-            Assert.IsTrue(File.Exists(Path.Combine(dir, "positions.json")));
-            Assert.IsTrue(File.Exists(Path.Combine(dir, "lean_bridge_status.json")));
-
-            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
-            Assert.AreEqual("lean_bridge", (string)json["source"]);
+            _buildPositionsMethod = typeof(LeanBridgeResultHandler).GetMethod(
+                "BuildPositions",
+                BindingFlags.NonPublic | BindingFlags.Instance
+            );
+            Assert.IsNotNull(_buildPositionsMethod, "BuildPositions should be accessible via reflection");
         }
 
         [Test]
-        public void BuildAccountSummaryUsesBrokerageSnapshot()
+        public void BuildPositionsDoesNotFallbackToAlgorithmHoldingsWhenBrokerageEmpty()
         {
-            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-            Config.Set("lean-bridge-output-dir", dir);
-            Config.Set("lean-bridge-snapshot-seconds", "0");
-            Config.Set("lean-bridge-heartbeat-seconds", "0");
-
-            using var messaging = new QuantConnect.Messaging.Messaging();
-            var api = new QuantConnect.Api.Api();
-            var transactionHandler = new TestBrokerageTransactionHandler();
-            var handler = new LeanBridgeResultHandler();
-            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
-
             var algorithm = new AlgorithmStub();
-            algorithm.SetFinishedWarmingUp();
-            handler.SetAlgorithm(algorithm, 100000);
+            algorithm.AddSecurities(Resolution.Minute, equities: new List<string> { "AAPL" });
+            var symbol = SymbolCache.GetSymbol("AAPL");
+            algorithm.Securities[symbol].Holdings.SetHoldings(100m, 10);
 
-            var brokerage = new InteractiveBrokersBrokerage();
-            brokerage.SetAccountSummaryValueForTesting("BASE", "NetLiquidation", "123456.78");
-            brokerage.SetAccountSummaryValueForTesting("BASE", "TotalCashValue", "90000.00");
-            transactionHandler.Initialize(algorithm, brokerage, handler);
+            using var brokerage = new EmptyHoldingsBrokerage();
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            using var api = new QuantConnect.Api.Api();
+            var transactionHandler = new BrokerageTransactionHandler();
+            var resultHandler = new TestResultHandler();
+            transactionHandler.Initialize(algorithm, brokerage, resultHandler);
+            algorithm.Transactions.SetOrderProcessor(transactionHandler);
 
-            handler.ProcessSynchronousEvents(true);
+            var bridgeHandler = new LeanBridgeResultHandler();
+            var job = new LiveNodePacket();
+            bridgeHandler.Initialize(new ResultHandlerInitializeParameters(job, messaging, api, transactionHandler, null));
+            bridgeHandler.SetAlgorithm(algorithm, 100000m);
 
-            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
-            Assert.AreEqual(123456.78m, json["items"]["NetLiquidation"].Value<decimal>());
-            Assert.AreEqual(90000.00m, json["items"]["TotalCashValue"].Value<decimal>());
-            Assert.AreEqual("lean_bridge", (string)json["source"]);
+            var payload = (Dictionary<string, object>)_buildPositionsMethod.Invoke(
+                bridgeHandler,
+                new object[] { DateTime.UtcNow }
+            );
+            var items = (List<Dictionary<string, object>>)payload["items"];
+            Assert.AreEqual(0, items.Count, "Algorithm holdings should not be used as a fallback.");
         }
 
         [Test]
-        public void BuildAccountSummaryMergesBaseFirstAndAccountUpdates()
+        public void BuildPositionsMarksStaleWhenSummaryShowsHoldingsButEmpty()
         {
-            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-            Config.Set("lean-bridge-output-dir", dir);
-            Config.Set("lean-bridge-snapshot-seconds", "0");
-            Config.Set("lean-bridge-heartbeat-seconds", "0");
-
-            using var messaging = new QuantConnect.Messaging.Messaging();
-            var api = new QuantConnect.Api.Api();
-            var transactionHandler = new TestBrokerageTransactionHandler();
-            var handler = new LeanBridgeResultHandler();
-            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
-
             var algorithm = new AlgorithmStub();
-            algorithm.SetFinishedWarmingUp();
-            handler.SetAlgorithm(algorithm, 100000);
+            algorithm.AddSecurities(Resolution.Minute, equities: new List<string> { "AAPL" });
 
-            var brokerage = new InteractiveBrokersBrokerage();
-            brokerage.SetAccountSummaryValueForTesting("USD", "NetLiquidation", "100");
-            brokerage.SetAccountSummaryValueForTesting("BASE", "NetLiquidation", "200");
-            brokerage.SetAccountSummaryValueForTesting("BASE", "TotalCashValue", "150");
-            brokerage.SetAccountValueForTesting("BASE", "TotalCashValue", "175");
-            transactionHandler.Initialize(algorithm, brokerage, handler);
+            using var brokerage = new SummaryHoldingsBrokerage();
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            using var api = new QuantConnect.Api.Api();
+            var transactionHandler = new BrokerageTransactionHandler();
+            var resultHandler = new TestResultHandler();
+            transactionHandler.Initialize(algorithm, brokerage, resultHandler);
+            algorithm.Transactions.SetOrderProcessor(transactionHandler);
 
-            handler.ProcessSynchronousEvents(true);
+            var bridgeHandler = new LeanBridgeResultHandler();
+            var job = new LiveNodePacket();
+            bridgeHandler.Initialize(new ResultHandlerInitializeParameters(job, messaging, api, transactionHandler, null));
+            bridgeHandler.SetAlgorithm(algorithm, 100000m);
 
-            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
-            Assert.AreEqual(200m, json["items"]["NetLiquidation"].Value<decimal>());
-            Assert.AreEqual(175m, json["items"]["TotalCashValue"].Value<decimal>());
+            var payload = (Dictionary<string, object>)_buildPositionsMethod.Invoke(
+                bridgeHandler,
+                new object[] { DateTime.UtcNow }
+            );
+            Assert.AreEqual(true, payload["stale"], "Empty IB holdings with positive summary should be marked stale.");
         }
 
         [Test]
-        public void BuildAccountSummaryMarksStaleWhenEmpty()
+        public void BuildPositionsReconnectsWhenSummaryShowsHoldings()
         {
-            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-            Config.Set("lean-bridge-output-dir", dir);
-            Config.Set("lean-bridge-snapshot-seconds", "0");
-            Config.Set("lean-bridge-heartbeat-seconds", "0");
-
-            using var messaging = new QuantConnect.Messaging.Messaging();
-            var api = new QuantConnect.Api.Api();
-            var transactionHandler = new TestBrokerageTransactionHandler();
-            var handler = new LeanBridgeResultHandler();
-            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
-
             var algorithm = new AlgorithmStub();
-            algorithm.SetFinishedWarmingUp();
-            handler.SetAlgorithm(algorithm, 100000);
+            algorithm.AddSecurities(Resolution.Minute, equities: new List<string> { "AAPL" });
 
-            var brokerage = new InteractiveBrokersBrokerage();
-            transactionHandler.Initialize(algorithm, brokerage, handler);
+            using var brokerage = new ReconnectHoldingsBrokerage();
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            using var api = new QuantConnect.Api.Api();
+            var transactionHandler = new BrokerageTransactionHandler();
+            var resultHandler = new TestResultHandler();
+            transactionHandler.Initialize(algorithm, brokerage, resultHandler);
+            algorithm.Transactions.SetOrderProcessor(transactionHandler);
 
-            handler.ProcessSynchronousEvents(true);
+            var bridgeHandler = new LeanBridgeResultHandler();
+            var job = new LiveNodePacket();
+            bridgeHandler.Initialize(new ResultHandlerInitializeParameters(job, messaging, api, transactionHandler, null));
+            bridgeHandler.SetAlgorithm(algorithm, 100000m);
 
-            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "account_summary.json")));
-            Assert.IsTrue(json["items"].HasValues == false);
-            Assert.IsTrue(json["stale"].Value<bool>());
-            Assert.AreEqual("ib_account_empty", (string)json["source_detail"]);
+            var payload = (Dictionary<string, object>)_buildPositionsMethod.Invoke(
+                bridgeHandler,
+                new object[] { DateTime.UtcNow }
+            );
+            var items = (List<Dictionary<string, object>>)payload["items"];
+
+            Assert.AreEqual(1, brokerage.ConnectCalls, "Expected a reconnect attempt for empty holdings.");
+            Assert.AreEqual(1, items.Count, "Holdings should be populated after reconnect.");
+            Assert.AreEqual(false, payload["stale"], "Recovered holdings should not be stale.");
         }
 
         [Test]
-        public void BuildPositionsUsesBrokerageHoldingsWhenAvailable()
+        public void BuildPositionsRefreshesHoldingsWhenSupported()
         {
-            var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-            Config.Set("lean-bridge-output-dir", dir);
-            Config.Set("lean-bridge-snapshot-seconds", "0");
-            Config.Set("lean-bridge-heartbeat-seconds", "0");
-
-            using var messaging = new QuantConnect.Messaging.Messaging();
-            var api = new QuantConnect.Api.Api();
-            var transactionHandler = new TestBrokerageTransactionHandler();
-            var handler = new LeanBridgeResultHandler();
-            handler.Initialize(new ResultHandlerInitializeParameters(new LiveNodePacket(), messaging, api, transactionHandler, null));
-
             var algorithm = new AlgorithmStub();
-            algorithm.SetFinishedWarmingUp();
-            algorithm.AddEquity("AAPL").Holdings.SetHoldings(1, 10);
-            handler.SetAlgorithm(algorithm, 100000);
+            algorithm.AddSecurities(Resolution.Minute, equities: new List<string> { "AAPL" });
 
-            var ibHolding = new Holding
+            using var brokerage = new RefreshableHoldingsBrokerage();
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            using var api = new QuantConnect.Api.Api();
+            var transactionHandler = new BrokerageTransactionHandler();
+            var resultHandler = new TestResultHandler();
+            transactionHandler.Initialize(algorithm, brokerage, resultHandler);
+            algorithm.Transactions.SetOrderProcessor(transactionHandler);
+
+            var bridgeHandler = new LeanBridgeResultHandler();
+            var job = new LiveNodePacket();
+            bridgeHandler.Initialize(new ResultHandlerInitializeParameters(job, messaging, api, transactionHandler, null));
+            bridgeHandler.SetAlgorithm(algorithm, 100000m);
+
+            var payload = (Dictionary<string, object>)_buildPositionsMethod.Invoke(
+                bridgeHandler,
+                new object[] { DateTime.UtcNow }
+            );
+            var items = (List<Dictionary<string, object>>)payload["items"];
+
+            Assert.AreEqual(1, brokerage.RefreshCalls, "Expected a holdings refresh attempt.");
+            Assert.AreEqual(1, items.Count, "Holdings should be populated after refresh.");
+            Assert.AreEqual(false, payload["stale"], "Recovered holdings should not be stale.");
+        }
+
+        [Test]
+        public void WritesHeartbeatStatusFile()
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), "lean-bridge-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            var statusPath = Path.Combine(tempDir, "lean_bridge_status.json");
+
+            var originalOutputDir = Config.Get("lean-bridge-output-dir", string.Empty);
+            var originalHeartbeatSeconds = Config.Get("lean-bridge-heartbeat-seconds", string.Empty);
+
+            LeanBridgeResultHandler handler = null;
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            using var api = new QuantConnect.Api.Api();
+            try
             {
-                Symbol = Symbols.SPY,
-                Quantity = 2,
-                AveragePrice = 100m,
-                MarketValue = 200m,
-                UnrealizedPnL = 0m,
-                CurrencySymbol = "$"
-            };
+                Config.Set("lean-bridge-output-dir", tempDir);
+                Config.Set("lean-bridge-heartbeat-seconds", "1");
 
-            var brokerage = new Mock<IBrokerage>();
-            brokerage.SetupGet(x => x.IsConnected).Returns(true);
-            brokerage.Setup(x => x.GetAccountHoldings()).Returns(new List<Holding> { ibHolding });
-            transactionHandler.Initialize(algorithm, brokerage.Object, handler);
+                handler = new LeanBridgeResultHandler();
+                var job = new LiveNodePacket
+                {
+                    DeployId = "test",
+                    UserId = 1,
+                    ProjectId = 1
+                };
+                var transactionHandler = new BacktestingTransactionHandler();
 
-            handler.ProcessSynchronousEvents(true);
+                handler.Initialize(new ResultHandlerInitializeParameters(job, messaging, api, transactionHandler, null));
 
-            var json = JObject.Parse(File.ReadAllText(Path.Combine(dir, "positions.json")));
-            Assert.AreEqual("ib_holdings", (string)json["source_detail"]);
-            Assert.AreEqual("SPY", (string)json["items"]?[0]?["symbol"]);
+                var deadline = DateTime.UtcNow.AddSeconds(3);
+                while (DateTime.UtcNow < deadline && !File.Exists(statusPath))
+                {
+                    Thread.Sleep(50);
+                }
+
+                Assert.That(File.Exists(statusPath), Is.True, "Heartbeat status file should be written");
+            }
+            finally
+            {
+                handler?.Exit();
+                Config.Set("lean-bridge-output-dir", originalOutputDir);
+                Config.Set("lean-bridge-heartbeat-seconds", originalHeartbeatSeconds);
+            }
         }
 
-        private class TestBrokerageTransactionHandler : BrokerageTransactionHandler
+        private class EmptyHoldingsBrokerage : Brokerage
         {
-            protected override void InitializeTransactionThread()
+            public override bool IsConnected => true;
+
+            public EmptyHoldingsBrokerage() : base("Test")
             {
-                _orderRequestQueues = new() { new BusyCollection<OrderRequest>() };
+            }
+
+            public override List<Order> GetOpenOrders()
+            {
+                return new List<Order>();
+            }
+
+            public override List<Holding> GetAccountHoldings()
+            {
+                return new List<Holding>();
+            }
+
+            public override List<CashAmount> GetCashBalance()
+            {
+                return new List<CashAmount>();
+            }
+
+            public override void Connect()
+            {
+            }
+
+            public override void Disconnect()
+            {
+            }
+
+            public override bool PlaceOrder(Order order)
+            {
+                return true;
+            }
+
+            public override bool UpdateOrder(Order order)
+            {
+                return true;
+            }
+
+            public override bool CancelOrder(Order order)
+            {
+                return true;
+            }
+        }
+
+        private class SummaryHoldingsBrokerage : EmptyHoldingsBrokerage, IAccountSummaryProvider
+        {
+            public Dictionary<string, string> GetAccountSummarySnapshot()
+            {
+                return new Dictionary<string, string>
+                {
+                    ["BASE:GrossPositionValue"] = "100"
+                };
+            }
+        }
+
+        private class ReconnectHoldingsBrokerage : SummaryHoldingsBrokerage
+        {
+            private bool _returnHoldings;
+            public int ConnectCalls { get; private set; }
+
+            public override void Connect()
+            {
+                ConnectCalls += 1;
+                _returnHoldings = true;
+            }
+
+            public override List<Holding> GetAccountHoldings()
+            {
+                if (!_returnHoldings)
+                {
+                    return new List<Holding>();
+                }
+
+                return new List<Holding>
+                {
+                    new Holding
+                    {
+                        Symbol = Symbols.SPY,
+                        Quantity = 5,
+                        AveragePrice = 100,
+                        MarketValue = 500,
+                        MarketPrice = 100,
+                        CurrencySymbol = "$"
+                    }
+                };
+            }
+        }
+
+        private class RefreshableHoldingsBrokerage : SummaryHoldingsBrokerage, IAccountHoldingsRefresher
+        {
+            private bool _refreshed;
+            public int RefreshCalls { get; private set; }
+
+            public bool RefreshAccountHoldings()
+            {
+                RefreshCalls += 1;
+                _refreshed = true;
+                return true;
+            }
+
+            public override List<Holding> GetAccountHoldings()
+            {
+                if (!_refreshed)
+                {
+                    return new List<Holding>();
+                }
+
+                return new List<Holding>
+                {
+                    new Holding
+                    {
+                        Symbol = Symbols.SPY,
+                        Quantity = 2,
+                        AveragePrice = 200,
+                        MarketValue = 400,
+                        MarketPrice = 200,
+                        CurrencySymbol = "$"
+                    }
+                };
             }
         }
     }

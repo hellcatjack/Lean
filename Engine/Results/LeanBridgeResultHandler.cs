@@ -18,6 +18,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using QuantConnect.Configuration;
 using QuantConnect.Brokerages;
 using QuantConnect.Orders;
@@ -35,6 +36,8 @@ namespace QuantConnect.Lean.Engine.Results
         private string _lastError;
         private DateTime? _lastErrorAt;
         private bool _degraded;
+        private readonly object _statusLock = new();
+        private Timer _heartbeatTimer;
 
         public override void Initialize(ResultHandlerInitializeParameters parameters)
         {
@@ -45,6 +48,8 @@ namespace QuantConnect.Lean.Engine.Results
             _writer = new LeanBridgeWriter(outputDir);
             _nextSnapshotUtc = DateTime.MinValue;
             _nextHeartbeatUtc = DateTime.MinValue;
+            TryWriteStatus(DateTime.UtcNow);
+            _heartbeatTimer = new Timer(_ => TryWriteStatus(DateTime.UtcNow), null, _heartbeatPeriod, _heartbeatPeriod);
         }
 
         public override void ProcessSynchronousEvents(bool forceProcess = false)
@@ -61,6 +66,13 @@ namespace QuantConnect.Lean.Engine.Results
                 _nextHeartbeatUtc = now.Add(_heartbeatPeriod);
                 TryWriteStatus(now);
             }
+        }
+
+        public override void Exit()
+        {
+            _heartbeatTimer?.Dispose();
+            _heartbeatTimer = null;
+            base.Exit();
         }
 
         public override void OrderEvent(OrderEvent newEvent)
@@ -98,7 +110,10 @@ namespace QuantConnect.Lean.Engine.Results
             };
             try
             {
-                _writer.WriteJsonAtomic("lean_bridge_status.json", payload);
+                lock (_statusLock)
+                {
+                    _writer.WriteJsonAtomic("lean_bridge_status.json", payload);
+                }
             }
             catch
             {
@@ -230,14 +245,65 @@ namespace QuantConnect.Lean.Engine.Results
             return false;
         }
 
+        private static bool TryGetSummaryDecimal(Dictionary<string, object> summary, string key, out decimal value)
+        {
+            value = 0m;
+            if (summary == null || !summary.TryGetValue(key, out var raw) || raw == null)
+            {
+                return false;
+            }
+
+            switch (raw)
+            {
+                case decimal parsed:
+                    value = parsed;
+                    return true;
+                case int intValue:
+                    value = intValue;
+                    return true;
+                case long longValue:
+                    value = longValue;
+                    return true;
+                case double doubleValue:
+                    value = Convert.ToDecimal(doubleValue, CultureInfo.InvariantCulture);
+                    return true;
+                case float floatValue:
+                    value = Convert.ToDecimal(floatValue, CultureInfo.InvariantCulture);
+                    return true;
+            }
+
+            return decimal.TryParse(raw.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out value);
+        }
+
         private Dictionary<string, object> BuildPositions(DateTime now)
         {
             var list = new List<Dictionary<string, object>>();
-            var sourceDetail = "algorithm_holdings";
+            var sourceDetail = "ib_holdings_empty";
+            var accountSummary = TryBuildIbAccountSummary();
+            var hasHoldingsSummary =
+                (TryGetSummaryDecimal(accountSummary, "GrossPositionValue", out var grossPositionValue)
+                 && grossPositionValue > 0m)
+                || (TryGetSummaryDecimal(accountSummary, "TotalHoldingsValue", out var totalHoldingsValue)
+                    && totalHoldingsValue > 0m);
 
             if (TransactionHandler is BrokerageTransactionHandler brokerageTransactionHandler)
             {
-                var brokerageHoldings = brokerageTransactionHandler.Brokerage?.GetAccountHoldings();
+                var brokerage = brokerageTransactionHandler.Brokerage;
+                var brokerageHoldings = brokerage?.GetAccountHoldings();
+                if ((brokerageHoldings == null || brokerageHoldings.Count == 0) && hasHoldingsSummary)
+                {
+                    if (brokerage is IAccountHoldingsRefresher refresher && refresher.RefreshAccountHoldings())
+                    {
+                        brokerageHoldings = brokerage?.GetAccountHoldings();
+                    }
+
+                    if (brokerageHoldings == null || brokerageHoldings.Count == 0)
+                    {
+                        brokerage?.Disconnect();
+                        brokerage?.Connect();
+                        brokerageHoldings = brokerage?.GetAccountHoldings();
+                    }
+                }
                 if (brokerageHoldings != null && brokerageHoldings.Count > 0)
                 {
                     sourceDetail = "ib_holdings";
@@ -255,31 +321,14 @@ namespace QuantConnect.Lean.Engine.Results
                     }
                 }
             }
-
-            if (list.Count == 0)
-            {
-                var holdings = GetHoldings(Algorithm.Securities.Values, Algorithm.SubscriptionManager.SubscriptionDataConfigService, onlyInvested: true);
-                foreach (var entry in holdings)
-                {
-                    var holding = entry.Value;
-                    list.Add(new Dictionary<string, object>
-                    {
-                        ["symbol"] = holding.Symbol.Value,
-                        ["quantity"] = holding.Quantity,
-                        ["avg_cost"] = holding.AveragePrice,
-                        ["market_value"] = holding.MarketValue,
-                        ["unrealized_pnl"] = holding.UnrealizedPnL,
-                        ["currency"] = holding.CurrencySymbol
-                    });
-                }
-            }
+            var stale = list.Count == 0 && hasHoldingsSummary;
             return new Dictionary<string, object>
             {
                 ["items"] = list,
                 ["refreshed_at"] = now.ToString("O"),
                 ["source"] = "lean_bridge",
                 ["source_detail"] = sourceDetail,
-                ["stale"] = false
+                ["stale"] = stale
             };
         }
 
