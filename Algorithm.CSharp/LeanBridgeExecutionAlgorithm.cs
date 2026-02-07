@@ -13,6 +13,7 @@
  * limitations under the License.
 */
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -410,9 +411,18 @@ namespace QuantConnect.Algorithm.CSharp
             {
                 AddEquity(request.Symbol, Resolution.Minute, extendedMarketHours: true);
             }
+
+            // Execute even when no data arrives (e.g. extended-hours manual orders). Live schedules
+            // are driven by the real-time handler, so they keep firing outside market hours.
+            Schedule.On(DateRules.EveryDay(), TimeRules.Every(TimeSpan.FromSeconds(1)), TryExecute);
         }
 
         public override void OnData(Slice data)
+        {
+            TryExecute();
+        }
+
+        private void TryExecute()
         {
             if (_executed)
             {
@@ -427,14 +437,31 @@ namespace QuantConnect.Algorithm.CSharp
                 return;
             }
 
-            var portfolioValue = Portfolio?.TotalPortfolioValue ?? 0m;
-            if (portfolioValue <= 0m)
+            var requiresPortfolio = false;
+            foreach (var request in _requests)
             {
-                Log("LEAN_BRIDGE_WAIT_PORTFOLIO");
-                return;
+                if (request == null) continue;
+                if (!request.UseQuantity)
+                {
+                    requiresPortfolio = true;
+                    break;
+                }
             }
 
-            var effectiveValue = portfolioValue * (1m - _executionParams.CashBufferRatio);
+            // Quantity-based execution doesn't need portfolio value, and must work when no market data is flowing.
+            var effectiveValue = 0m;
+            if (requiresPortfolio)
+            {
+                var portfolioValue = Portfolio?.TotalPortfolioValue ?? 0m;
+                if (portfolioValue <= 0m)
+                {
+                    Log("LEAN_BRIDGE_WAIT_PORTFOLIO");
+                    return;
+                }
+
+                effectiveValue = portfolioValue * (1m - _executionParams.CashBufferRatio);
+            }
+
             var submittedOrders = 0;
             var submittedIntents = 0;
             foreach (var request in _requests)
@@ -459,8 +486,17 @@ namespace QuantConnect.Algorithm.CSharp
                         var price = Securities[request.Symbol].Price;
                         if (price <= 0m)
                         {
-                            Log($"LEAN_BRIDGE_WAIT_PRICE: id={intentId} symbol={request.Symbol}");
-                            return;
+                            var fallbackPrice = request.LimitPrice;
+                            if (fallbackPrice > 0m)
+                            {
+                                price = fallbackPrice;
+                                Log($"LEAN_BRIDGE_FALLBACK_PRICE: id={intentId} symbol={request.Symbol} price={price.ToString(CultureInfo.InvariantCulture)} source=limitPrice");
+                            }
+                            else
+                            {
+                                Log($"LEAN_BRIDGE_WAIT_PRICE: id={intentId} symbol={request.Symbol}");
+                                return;
+                            }
                         }
 
                         var rawQty = System.Math.Abs(request.Weight) * effectiveValue / price;
@@ -469,8 +505,17 @@ namespace QuantConnect.Algorithm.CSharp
                     }
                     catch
                     {
-                        Log($"LEAN_BRIDGE_SKIP: price unavailable for {request.Symbol} (id={intentId})");
-                        continue;
+                        var fallbackPrice = request.LimitPrice;
+                        if (fallbackPrice <= 0m)
+                        {
+                            Log($"LEAN_BRIDGE_SKIP: price unavailable for {request.Symbol} (id={intentId})");
+                            continue;
+                        }
+
+                        var rawQty = System.Math.Abs(request.Weight) * effectiveValue / fallbackPrice;
+                        var sizedQty = ApplyExecutionConstraints(rawQty, _executionParams.LotSize, _executionParams.MinQty);
+                        computedQty = request.Weight >= 0m ? sizedQty : -sizedQty;
+                        Log($"LEAN_BRIDGE_FALLBACK_PRICE: id={intentId} symbol={request.Symbol} price={fallbackPrice.ToString(CultureInfo.InvariantCulture)} source=limitPrice");
                     }
                 }
                 IOrderProperties orderProperties = null;
