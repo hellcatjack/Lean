@@ -31,8 +31,10 @@ namespace QuantConnect.Lean.Engine.Results
         private LeanBridgeWriter _writer;
         private DateTime _nextSnapshotUtc;
         private DateTime _nextHeartbeatUtc;
+        private DateTime _nextOpenOrdersUtc;
         private TimeSpan _snapshotPeriod;
         private TimeSpan _heartbeatPeriod;
+        private TimeSpan _openOrdersPeriod;
         private string _lastError;
         private DateTime? _lastErrorAt;
         private bool _degraded;
@@ -45,9 +47,12 @@ namespace QuantConnect.Lean.Engine.Results
             var outputDir = Config.Get("lean-bridge-output-dir", Path.Combine(Globals.DataFolder, "lean_bridge"));
             _snapshotPeriod = TimeSpan.FromSeconds(Config.GetInt("lean-bridge-snapshot-seconds", 2));
             _heartbeatPeriod = TimeSpan.FromSeconds(Config.GetInt("lean-bridge-heartbeat-seconds", 5));
+            var openOrdersSeconds = Config.GetInt("lean-bridge-open-orders-seconds", 10);
+            _openOrdersPeriod = openOrdersSeconds > 0 ? TimeSpan.FromSeconds(openOrdersSeconds) : TimeSpan.Zero;
             _writer = new LeanBridgeWriter(outputDir);
             _nextSnapshotUtc = DateTime.MinValue;
             _nextHeartbeatUtc = DateTime.MinValue;
+            _nextOpenOrdersUtc = DateTime.MinValue;
             TryWriteStatus(DateTime.UtcNow);
             _heartbeatTimer = new Timer(_ => TryWriteStatus(DateTime.UtcNow), null, _heartbeatPeriod, _heartbeatPeriod);
         }
@@ -65,6 +70,11 @@ namespace QuantConnect.Lean.Engine.Results
             {
                 _nextHeartbeatUtc = now.Add(_heartbeatPeriod);
                 TryWriteStatus(now);
+            }
+            if (_openOrdersPeriod != TimeSpan.Zero && (forceProcess || now >= _nextOpenOrdersUtc))
+            {
+                _nextOpenOrdersUtc = now.Add(_openOrdersPeriod);
+                TryWriteOpenOrders(now);
             }
         }
 
@@ -88,6 +98,20 @@ namespace QuantConnect.Lean.Engine.Results
                 _writer.WriteJsonAtomic("account_summary.json", BuildAccountSummary(now));
                 _writer.WriteJsonAtomic("positions.json", BuildPositions(now));
                 _writer.WriteJsonAtomic("quotes.json", BuildQuotes(now));
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                _lastErrorAt = now;
+                _degraded = true;
+            }
+        }
+
+        private void TryWriteOpenOrders(DateTime now)
+        {
+            try
+            {
+                _writer.WriteJsonAtomic("open_orders.json", BuildOpenOrders(now));
             }
             catch (Exception ex)
             {
@@ -353,6 +377,71 @@ namespace QuantConnect.Lean.Engine.Results
                 ["refreshed_at"] = now.ToString("O"),
                 ["source"] = "lean_bridge",
                 ["stale"] = false
+            };
+        }
+
+        private Dictionary<string, object> BuildOpenOrders(DateTime now)
+        {
+            var list = new List<Dictionary<string, object>>();
+            var stale = false;
+            var sourceDetail = "brokerage_unavailable";
+
+            try
+            {
+                if (TransactionHandler is BrokerageTransactionHandler brokerageTransactionHandler)
+                {
+                    var brokerage = brokerageTransactionHandler.Brokerage;
+                    if (brokerage != null)
+                    {
+                        sourceDetail = "ib_open_orders_empty";
+                        var openOrders = brokerage.GetOpenOrders();
+                        if (openOrders != null && openOrders.Count > 0)
+                        {
+                            sourceDetail = "ib_open_orders";
+                            foreach (var order in openOrders)
+                            {
+                                if (order == null) continue;
+                                var record = new Dictionary<string, object>
+                                {
+                                    ["id"] = order.Id,
+                                    ["symbol"] = order.Symbol?.Value,
+                                    ["quantity"] = order.Quantity,
+                                    ["direction"] = order.Direction.ToString(),
+                                    ["type"] = order.Type.ToString(),
+                                    ["status"] = order.Status.ToString(),
+                                    ["tag"] = order.Tag,
+                                    ["time"] = order.Time.ToString("O"),
+                                };
+                                if (order.BrokerId != null && order.BrokerId.Count > 0)
+                                {
+                                    record["brokerage_ids"] = order.BrokerId;
+                                }
+                                if (order is LimitOrder limit)
+                                {
+                                    record["limit_price"] = limit.LimitPrice;
+                                }
+                                list.Add(record);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                _lastErrorAt = now;
+                _degraded = true;
+                stale = true;
+                sourceDetail = "ib_open_orders_error";
+            }
+
+            return new Dictionary<string, object>
+            {
+                ["items"] = list,
+                ["refreshed_at"] = now.ToString("O"),
+                ["source"] = "lean_bridge",
+                ["source_detail"] = sourceDetail,
+                ["stale"] = stale
             };
         }
     }
