@@ -125,6 +125,21 @@ namespace QuantConnect.Tests.Algorithm
             Assert.That(lines[1], Does.Contain("quantity=-1"));
         }
 
+        [TestCase(null, "MKT")]
+        [TestCase("", "MKT")]
+        [TestCase("MKT", "MKT")]
+        [TestCase("market", "MKT")]
+        [TestCase("LIMIT", "LMT")]
+        [TestCase("lmt", "LMT")]
+        [TestCase("Adaptive LMT(IBKR)", "ADAPTIVE_LMT")]
+        [TestCase("adaptive_limit", "ADAPTIVE_LMT")]
+        [TestCase("PEG MID", "PEG_MID")]
+        [TestCase("peGmid", "PEG_MID")]
+        public void NormalizesOrderTypes(string input, string expected)
+        {
+            Assert.AreEqual(expected, LeanBridgeExecutionAlgorithm.NormalizeOrderType(input));
+        }
+
         [Test]
         public void DetectsAllIntentOrdersFilled()
         {

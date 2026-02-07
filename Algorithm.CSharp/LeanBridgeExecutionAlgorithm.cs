@@ -243,6 +243,96 @@ namespace QuantConnect.Algorithm.CSharp
             return requests;
         }
 
+        public static string NormalizeOrderType(string value)
+        {
+            var text = string.IsNullOrWhiteSpace(value) ? "MKT" : value.Trim().ToUpperInvariant();
+            var parenIndex = text.IndexOf('(');
+            if (parenIndex >= 0)
+            {
+                text = text.Substring(0, parenIndex).Trim();
+            }
+
+            text = text.Replace("-", "_").Replace(" ", "_");
+            while (text.Contains("__"))
+            {
+                text = text.Replace("__", "_");
+            }
+            text = text.Trim('_');
+
+            if (text == "MARKET" || text == "MARKET_ORDER")
+            {
+                return "MKT";
+            }
+            if (text == "LIMIT" || text == "LIMIT_ORDER")
+            {
+                return "LMT";
+            }
+            if (text == "ADAPTIVE" || text == "ADAPTIVELMT" || text == "ADAPTIVE_LIMIT" || text == "ADAPTIVE_LMT")
+            {
+                return "ADAPTIVE_LMT";
+            }
+            if (text == "PEG_MID" || text == "PEGMID" || text == "MIDPOINT" || text == "PEG_MIDPOINT")
+            {
+                return "PEG_MID";
+            }
+
+            return string.IsNullOrWhiteSpace(text) ? "MKT" : text;
+        }
+
+        private static bool IsLimitLike(string orderType)
+        {
+            return orderType == "LMT" || orderType == "ADAPTIVE_LMT" || orderType == "PEG_MID";
+        }
+
+        private decimal ResolveMidPrice(string symbol)
+        {
+            try
+            {
+                var security = Securities[symbol];
+                if (security.BidPrice > 0m && security.AskPrice > 0m)
+                {
+                    return (security.BidPrice + security.AskPrice) / 2m;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+            try
+            {
+                return Securities[symbol].Price;
+            }
+            catch
+            {
+                return 0m;
+            }
+        }
+
+        private decimal ResolveAdaptiveLimitPrice(string symbol, decimal quantity)
+        {
+            try
+            {
+                var security = Securities[symbol];
+                if (quantity > 0m)
+                {
+                    if (security.AskPrice > 0m) return security.AskPrice;
+                    if (security.Price > 0m) return security.Price;
+                    if (security.BidPrice > 0m) return security.BidPrice;
+                }
+                if (quantity < 0m)
+                {
+                    if (security.BidPrice > 0m) return security.BidPrice;
+                    if (security.Price > 0m) return security.Price;
+                    if (security.AskPrice > 0m) return security.AskPrice;
+                }
+                return security.Price;
+            }
+            catch
+            {
+                return 0m;
+            }
+        }
+
         public static List<string> BuildExecutionLogLines(string intentPath, List<ExecutionRequest> requests)
         {
             var lines = new List<string>();
@@ -356,24 +446,9 @@ namespace QuantConnect.Algorithm.CSharp
                 }
                 var intentId = request.OrderIntentId.Trim();
                 var weight = request.Weight.ToString(CultureInfo.InvariantCulture);
-                var orderType = string.IsNullOrWhiteSpace(request.OrderType) ? "MKT" : request.OrderType.Trim().ToUpperInvariant();
-                if (orderType == "LIMIT")
-                {
-                    orderType = "LMT";
-                }
+                var orderType = NormalizeOrderType(request.OrderType);
                 var limitPriceValue = request.LimitPrice;
-                if (limitPriceValue <= 0m && orderType == "LMT")
-                {
-                    try
-                    {
-                        limitPriceValue = Securities[request.Symbol].Price;
-                    }
-                    catch
-                    {
-                        limitPriceValue = 0m;
-                    }
-                }
-                var limitPrice = limitPriceValue.ToString(CultureInfo.InvariantCulture);
+                var limitLike = IsLimitLike(orderType);
                 var outsideRth = request.AllowOutsideRth.ToString().ToLowerInvariant();
                 var session = string.IsNullOrWhiteSpace(request.Session) ? "-" : request.Session.Trim();
                 var computedQty = request.Quantity;
@@ -398,8 +473,6 @@ namespace QuantConnect.Algorithm.CSharp
                         continue;
                     }
                 }
-                var quantity = computedQty.ToString(CultureInfo.InvariantCulture);
-                Log($"LEAN_BRIDGE_SUBMIT: id={intentId} symbol={request.Symbol} quantity={quantity} weight={weight} useQuantity={request.UseQuantity.ToString().ToLowerInvariant()} orderType={orderType} limitPrice={limitPrice} outsideRth={outsideRth} session={session}");
                 IOrderProperties orderProperties = null;
                 if (request.AllowOutsideRth)
                 {
@@ -412,7 +485,32 @@ namespace QuantConnect.Algorithm.CSharp
                 }
 
                 OrderTicket ticket = null;
-                if (orderType == "LMT")
+                if (limitLike && limitPriceValue <= 0m)
+                {
+                    if (orderType == "PEG_MID")
+                    {
+                        limitPriceValue = ResolveMidPrice(request.Symbol);
+                    }
+                    else if (orderType == "ADAPTIVE_LMT")
+                    {
+                        limitPriceValue = ResolveAdaptiveLimitPrice(request.Symbol, computedQty);
+                    }
+                    else
+                    {
+                        try
+                        {
+                            limitPriceValue = Securities[request.Symbol].Price;
+                        }
+                        catch
+                        {
+                            limitPriceValue = 0m;
+                        }
+                    }
+                }
+                var quantity = computedQty.ToString(CultureInfo.InvariantCulture);
+                var limitPrice = limitPriceValue.ToString(CultureInfo.InvariantCulture);
+                Log($"LEAN_BRIDGE_SUBMIT: id={intentId} symbol={request.Symbol} quantity={quantity} weight={weight} useQuantity={request.UseQuantity.ToString().ToLowerInvariant()} orderType={orderType} limitPrice={limitPrice} outsideRth={outsideRth} session={session}");
+                if (limitLike)
                 {
                     if (limitPriceValue <= 0m)
                     {
