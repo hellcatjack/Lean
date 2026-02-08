@@ -141,19 +141,19 @@ namespace QuantConnect.Tests.Algorithm
         }
 
         [Test]
-        public void DetectsAllIntentOrdersFilled()
+        public void DetectsAllIntentOrdersTerminal()
         {
             var intentOrders = new Dictionary<string, HashSet<int>>
             {
                 { "direct:1", new HashSet<int> { 10, 11 } },
                 { "direct:2", new HashSet<int> { 12 } }
             };
-            var filledOrderIds = new HashSet<int> { 10, 11, 12 };
+            var terminalOrderIds = new HashSet<int> { 10, 11, 12 };
 
-            Assert.IsTrue(LeanBridgeExecutionAlgorithm.AreAllIntentOrdersFilled(intentOrders, filledOrderIds));
+            Assert.IsTrue(LeanBridgeExecutionAlgorithm.AreAllIntentOrdersTerminal(intentOrders, terminalOrderIds));
 
-            filledOrderIds.Remove(11);
-            Assert.IsFalse(LeanBridgeExecutionAlgorithm.AreAllIntentOrdersFilled(intentOrders, filledOrderIds));
+            terminalOrderIds.Remove(11);
+            Assert.IsFalse(LeanBridgeExecutionAlgorithm.AreAllIntentOrdersTerminal(intentOrders, terminalOrderIds));
         }
     }
 }

@@ -14,6 +14,7 @@
 */
 
 using QuantConnect.Interfaces;
+using System.Collections.Generic;
 
 namespace QuantConnect.Orders
 {
@@ -57,11 +58,28 @@ namespace QuantConnect.Orders
         public bool OutsideRegularTradingHours { get; set; }
 
         /// <summary>
+        /// Optional IB algo strategy (for example: "Adaptive").
+        /// When set, the IB brokerage will populate <c>IBApi.Order.AlgoStrategy</c>.
+        /// </summary>
+        public string AlgoStrategy { get; set; }
+
+        /// <summary>
+        /// Optional IB algo parameters for <see cref="AlgoStrategy"/>.
+        /// Example: <c>{"adaptivePriority": "Normal"}</c>.
+        /// </summary>
+        public Dictionary<string, string> AlgoParams { get; set; }
+
+        /// <summary>
         /// Returns a new instance clone of this object
         /// </summary>
         public override IOrderProperties Clone()
         {
-            return (InteractiveBrokersOrderProperties)MemberwiseClone();
+            var clone = (InteractiveBrokersOrderProperties)MemberwiseClone();
+            if (AlgoParams != null)
+            {
+                clone.AlgoParams = new Dictionary<string, string>(AlgoParams);
+            }
+            return clone;
         }
     }
 }

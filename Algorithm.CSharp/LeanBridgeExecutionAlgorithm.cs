@@ -34,11 +34,14 @@ namespace QuantConnect.Algorithm.CSharp
     {
         private bool _executed;
         private bool _exitRequested;
+        private DateTime _submittedAtUtc;
+        private DateTime _exitAfterSubmitDeadlineUtc = DateTime.MinValue;
+        private readonly HashSet<int> _ackedOrderIds = new();
         private ExecutionParams _executionParams = new();
         private List<ExecutionRequest> _requests = new();
         private readonly Dictionary<int, string> _orderIdToIntent = new();
         private readonly Dictionary<string, HashSet<int>> _intentToOrderIds = new();
-        private readonly HashSet<int> _filledOrderIds = new();
+        private readonly HashSet<int> _terminalOrderIds = new();
 
         private class ExecutionParams
         {
@@ -365,7 +368,7 @@ namespace QuantConnect.Algorithm.CSharp
             return lines;
         }
 
-        public static bool AreAllIntentOrdersFilled(Dictionary<string, HashSet<int>> intentOrders, HashSet<int> filledOrderIds)
+        public static bool AreAllIntentOrdersTerminal(Dictionary<string, HashSet<int>> intentOrders, HashSet<int> terminalOrderIds)
         {
             if (intentOrders == null || intentOrders.Count == 0)
             {
@@ -381,7 +384,7 @@ namespace QuantConnect.Algorithm.CSharp
 
                 foreach (var orderId in orders)
                 {
-                    if (filledOrderIds == null || !filledOrderIds.Contains(orderId))
+                    if (terminalOrderIds == null || !terminalOrderIds.Contains(orderId))
                     {
                         return false;
                     }
@@ -426,6 +429,7 @@ namespace QuantConnect.Algorithm.CSharp
         {
             if (_executed)
             {
+                TryExitAfterSubmit();
                 return;
             }
 
@@ -518,11 +522,23 @@ namespace QuantConnect.Algorithm.CSharp
                         Log($"LEAN_BRIDGE_FALLBACK_PRICE: id={intentId} symbol={request.Symbol} price={fallbackPrice.ToString(CultureInfo.InvariantCulture)} source=limitPrice");
                     }
                 }
-                IOrderProperties orderProperties = null;
+                InteractiveBrokersOrderProperties ibOrderProperties = null;
                 if (request.AllowOutsideRth)
                 {
-                    orderProperties = new InteractiveBrokersOrderProperties { OutsideRegularTradingHours = true };
+                    ibOrderProperties = new InteractiveBrokersOrderProperties { OutsideRegularTradingHours = true };
                 }
+                if (orderType == "ADAPTIVE_LMT")
+                {
+                    ibOrderProperties ??= new InteractiveBrokersOrderProperties();
+                    ibOrderProperties.AlgoStrategy = "Adaptive";
+                    var priority = Config.Get("lean-bridge-adaptive-priority", "Normal");
+                    if (string.IsNullOrWhiteSpace(priority)) priority = "Normal";
+                    ibOrderProperties.AlgoParams = new Dictionary<string, string>
+                    {
+                        { "adaptivePriority", priority.Trim() }
+                    };
+                }
+                IOrderProperties orderProperties = ibOrderProperties;
                 if (computedQty == 0m)
                 {
                     Log($"LEAN_BRIDGE_SKIP: computed quantity=0 for {request.Symbol} (id={intentId})");
@@ -585,6 +601,18 @@ namespace QuantConnect.Algorithm.CSharp
                 Log("LEAN_BRIDGE_NO_ORDERS_SUBMITTED");
                 RequestExit("no_orders_submitted");
             }
+            else if (Config.GetBool("lean-bridge-exit-on-submit", true))
+            {
+                // Default behavior: submit once and exit shortly after. We keep the engine alive
+                // briefly to capture initial order status events (Submitted/Invalid), so the backend
+                // can sync statuses even when some symbols are rejected outside RTH.
+                _submittedAtUtc = DateTime.UtcNow;
+                var ackTimeoutSeconds = Config.GetInt("lean-bridge-exit-ack-timeout-seconds", 30);
+                if (ackTimeoutSeconds < 0) ackTimeoutSeconds = 0;
+                _exitAfterSubmitDeadlineUtc = _submittedAtUtc.AddSeconds(ackTimeoutSeconds);
+                Log($"LEAN_BRIDGE_EXIT_ARM: orders={submittedOrders} ackTimeoutSeconds={ackTimeoutSeconds}");
+                TryExitAfterSubmit();
+            }
         }
 
         public override void OnOrderEvent(OrderEvent orderEvent)
@@ -596,7 +624,17 @@ namespace QuantConnect.Algorithm.CSharp
 
             Log($"LEAN_BRIDGE_ORDER_EVENT: orderId={orderEvent.OrderId} status={orderEvent.Status} fillQuantity={orderEvent.FillQuantity.ToString(CultureInfo.InvariantCulture)} symbol={orderEvent.Symbol}");
 
-            if (orderEvent.Status != OrderStatus.Filled)
+            if (Config.GetBool("lean-bridge-exit-on-submit", true))
+            {
+                if (_orderIdToIntent.ContainsKey(orderEvent.OrderId))
+                {
+                    _ackedOrderIds.Add(orderEvent.OrderId);
+                }
+                TryExitAfterSubmit();
+                return;
+            }
+
+            if (!IsTerminalStatus(orderEvent.Status))
             {
                 return;
             }
@@ -606,14 +644,19 @@ namespace QuantConnect.Algorithm.CSharp
                 return;
             }
 
-            _filledOrderIds.Add(orderEvent.OrderId);
-            Log($"LEAN_BRIDGE_FILL_TRACK: intent={intentId} filledOrders={_filledOrderIds.Count} totalOrders={_orderIdToIntent.Count}");
+            _terminalOrderIds.Add(orderEvent.OrderId);
+            Log($"LEAN_BRIDGE_TERMINAL_TRACK: intent={intentId} terminalOrders={_terminalOrderIds.Count} totalOrders={_orderIdToIntent.Count}");
 
-            if (!_exitRequested && AreAllIntentOrdersFilled(_intentToOrderIds, _filledOrderIds))
+            if (!_exitRequested && AreAllIntentOrdersTerminal(_intentToOrderIds, _terminalOrderIds))
             {
-                Log($"LEAN_BRIDGE_ALL_FILLED: intents={_intentToOrderIds.Count} orders={_orderIdToIntent.Count}");
-                RequestExit("all_filled");
+                Log($"LEAN_BRIDGE_ALL_TERMINAL: intents={_intentToOrderIds.Count} orders={_orderIdToIntent.Count}");
+                RequestExit("all_terminal");
             }
+        }
+
+        private static bool IsTerminalStatus(OrderStatus status)
+        {
+            return status == OrderStatus.Filled || status == OrderStatus.Canceled || status == OrderStatus.Invalid;
         }
 
         private int RegisterTickets(string intentId, IEnumerable<OrderTicket> tickets)
@@ -659,6 +702,37 @@ namespace QuantConnect.Algorithm.CSharp
 
             _exitRequested = true;
             Quit(reason);
+        }
+
+        private void TryExitAfterSubmit()
+        {
+            if (_exitRequested)
+            {
+                return;
+            }
+            if (!Config.GetBool("lean-bridge-exit-on-submit", true))
+            {
+                return;
+            }
+            if (!_executed)
+            {
+                return;
+            }
+
+            var total = _orderIdToIntent.Count;
+            var acked = _ackedOrderIds.Count;
+            if (total > 0 && acked >= total)
+            {
+                Log($"LEAN_BRIDGE_EXIT_ACKED: acked={acked} total={total}");
+                RequestExit("submitted_ack");
+                return;
+            }
+
+            if (_exitAfterSubmitDeadlineUtc != DateTime.MinValue && DateTime.UtcNow >= _exitAfterSubmitDeadlineUtc)
+            {
+                Log($"LEAN_BRIDGE_EXIT_TIMEOUT: acked={acked} total={total}");
+                RequestExit("submitted_timeout");
+            }
         }
     }
 }
