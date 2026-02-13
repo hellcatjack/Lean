@@ -58,6 +58,9 @@ namespace QuantConnect.Lean.Engine.Results
         private DateTime _executionsSinceUtc;
         private readonly Dictionary<string, DateTime> _seenExecutionIds = new(StringComparer.Ordinal);
         private readonly Dictionary<int, string> _knownOrderTags = new();
+        private TimeSpan _degradedRecoveryPeriod = TimeSpan.FromSeconds(30);
+        private const int OpenOrdersSnapshotMaxAttempts = 3;
+        private static readonly TimeSpan OpenOrdersSnapshotRetryDelay = TimeSpan.FromMilliseconds(5);
 
         public override void Initialize(ResultHandlerInitializeParameters parameters)
         {
@@ -70,6 +73,8 @@ namespace QuantConnect.Lean.Engine.Results
             _openOrdersPeriod = openOrdersSeconds > 0 ? TimeSpan.FromSeconds(openOrdersSeconds) : TimeSpan.Zero;
             var executionsSeconds = Config.GetInt("lean-bridge-executions-seconds", 0);
             _executionsPeriod = executionsSeconds > 0 ? TimeSpan.FromSeconds(executionsSeconds) : TimeSpan.Zero;
+            var recoverySeconds = Config.GetInt("lean-bridge-error-recovery-seconds", 30);
+            _degradedRecoveryPeriod = TimeSpan.FromSeconds(Math.Max(1, recoverySeconds));
             _writer = new LeanBridgeWriter(outputDir);
             _nextSnapshotUtc = DateTime.MinValue;
             _nextHeartbeatUtc = DateTime.MinValue;
@@ -154,9 +159,7 @@ namespace QuantConnect.Lean.Engine.Results
             }
             catch (Exception ex)
             {
-                _lastError = ex.Message;
-                _lastErrorAt = now;
-                _degraded = true;
+                MarkBridgeError(ex, now);
             }
         }
 
@@ -168,9 +171,7 @@ namespace QuantConnect.Lean.Engine.Results
             }
             catch (Exception ex)
             {
-                _lastError = ex.Message;
-                _lastErrorAt = now;
-                _degraded = true;
+                MarkBridgeError(ex, now);
             }
         }
 
@@ -181,6 +182,67 @@ namespace QuantConnect.Lean.Engine.Results
                 ProcessCommands(now);
             }
             catch (Exception ex)
+            {
+                MarkBridgeError(ex, now);
+            }
+        }
+
+        private static bool IsCollectionModifiedException(Exception ex)
+        {
+            if (ex is not InvalidOperationException)
+            {
+                return false;
+            }
+            var message = ex.Message ?? string.Empty;
+            return message.IndexOf("collection was modified", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private bool TryGetOpenOrdersSnapshot(
+            IBrokerage brokerage,
+            out List<Order> openOrders,
+            out Exception error)
+        {
+            openOrders = new List<Order>();
+            error = null;
+            if (brokerage == null)
+            {
+                return true;
+            }
+
+            for (var attempt = 1; attempt <= OpenOrdersSnapshotMaxAttempts; attempt++)
+            {
+                try
+                {
+                    var orders = brokerage.GetOpenOrders();
+                    if (orders == null || orders.Count == 0)
+                    {
+                        openOrders = new List<Order>();
+                        return true;
+                    }
+
+                    // Snapshot to isolate downstream enumeration from brokerage-side mutations.
+                    openOrders = orders.ToList();
+                    return true;
+                }
+                catch (Exception ex) when (
+                    attempt < OpenOrdersSnapshotMaxAttempts
+                    && IsCollectionModifiedException(ex))
+                {
+                    Thread.Sleep(OpenOrdersSnapshotRetryDelay);
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void MarkBridgeError(Exception ex, DateTime now)
+        {
+            lock (_statusLock)
             {
                 _lastError = ex.Message;
                 _lastErrorAt = now;
@@ -583,15 +645,9 @@ namespace QuantConnect.Lean.Engine.Results
                 List<Order> openOrders = new List<Order>();
                 if (commands.Count > 0)
                 {
-                    try
+                    if (!TryGetOpenOrdersSnapshot(brokerage, out openOrders, out var openOrdersError))
                     {
-                        openOrders = brokerage.GetOpenOrders() ?? new List<Order>();
-                    }
-                    catch (Exception ex)
-                    {
-                        _lastError = ex.Message;
-                        _lastErrorAt = now;
-                        _degraded = true;
+                        MarkBridgeError(openOrdersError, now);
                         openOrders = new List<Order>();
                     }
                 }
@@ -629,9 +685,7 @@ namespace QuantConnect.Lean.Engine.Results
                         }
                         catch (Exception ex)
                         {
-                            _lastError = ex.Message;
-                            _lastErrorAt = now;
-                            _degraded = true;
+                            MarkBridgeError(ex, now);
                         }
                     }
 
@@ -711,6 +765,13 @@ namespace QuantConnect.Lean.Engine.Results
                                 if (order.BrokerId != null && order.BrokerId.Count > 0)
                                 {
                                     brokerIds.AddRange(order.BrokerId);
+                                    foreach (var brokerId in order.BrokerId)
+                                    {
+                                        if (int.TryParse(brokerId, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+                                        {
+                                            _knownOrderTags[parsed] = cmd.Tag;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -719,9 +780,7 @@ namespace QuantConnect.Lean.Engine.Results
                     {
                         status = "place_failed";
                         err = ex.Message;
-                        _lastError = ex.Message;
-                        _lastErrorAt = now;
-                        _degraded = true;
+                        MarkBridgeError(ex, now);
                     }
 
                     WriteCommandResult(cmd.CommandId, new Dictionary<string, object>
@@ -749,21 +808,35 @@ namespace QuantConnect.Lean.Engine.Results
 
         private void TryWriteStatus(DateTime now)
         {
+            bool degraded;
+            string lastError;
+            DateTime? lastErrorAt;
+            lock (_statusLock)
+            {
+                if (_degraded && _lastErrorAt.HasValue && now - _lastErrorAt.Value >= _degradedRecoveryPeriod)
+                {
+                    _degraded = false;
+                    _lastError = null;
+                    _lastErrorAt = null;
+                }
+
+                degraded = _degraded;
+                lastError = _lastError;
+                lastErrorAt = _lastErrorAt;
+            }
+
             var payload = new Dictionary<string, object>
             {
-                ["status"] = _degraded ? "degraded" : "ok",
+                ["status"] = degraded ? "degraded" : "ok",
                 ["last_heartbeat"] = now.ToString("O"),
-                ["last_error"] = _lastError,
-                ["last_error_at"] = _lastErrorAt?.ToString("O"),
+                ["last_error"] = lastError,
+                ["last_error_at"] = lastErrorAt?.ToString("O"),
                 ["source"] = "lean_bridge",
                 ["stale"] = false
             };
             try
             {
-                lock (_statusLock)
-                {
-                    _writer.WriteJsonAtomic("lean_bridge_status.json", payload);
-                }
+                _writer.WriteJsonAtomic("lean_bridge_status.json", payload);
             }
             catch
             {
@@ -800,9 +873,7 @@ namespace QuantConnect.Lean.Engine.Results
             }
             catch (Exception ex)
             {
-                _lastError = ex.Message;
-                _lastErrorAt = DateTime.UtcNow;
-                _degraded = true;
+                MarkBridgeError(ex, DateTime.UtcNow);
             }
         }
 
@@ -936,9 +1007,7 @@ namespace QuantConnect.Lean.Engine.Results
             }
             catch (Exception ex)
             {
-                _lastError = ex.Message;
-                _lastErrorAt = now;
-                _degraded = true;
+                MarkBridgeError(ex, now);
             }
         }
 
@@ -946,8 +1015,9 @@ namespace QuantConnect.Lean.Engine.Results
         {
             try
             {
-                var openOrders = brokerage.GetOpenOrders();
-                if (openOrders == null || openOrders.Count == 0)
+                if (!TryGetOpenOrdersSnapshot(brokerage, out var openOrders, out _)
+                    || openOrders == null
+                    || openOrders.Count == 0)
                 {
                     return;
                 }
@@ -1359,8 +1429,12 @@ namespace QuantConnect.Lean.Engine.Results
                     if (brokerage != null)
                     {
                         sourceDetail = "ib_open_orders_empty";
-                        var openOrders = brokerage.GetOpenOrders();
-                        if (openOrders != null && openOrders.Count > 0)
+                        if (!TryGetOpenOrdersSnapshot(brokerage, out var openOrders, out var openOrdersError))
+                        {
+                            throw openOrdersError;
+                        }
+
+                        if (openOrders.Count > 0)
                         {
                             sourceDetail = "ib_open_orders";
                             foreach (var order in openOrders)
@@ -1393,9 +1467,7 @@ namespace QuantConnect.Lean.Engine.Results
             }
             catch (Exception ex)
             {
-                _lastError = ex.Message;
-                _lastErrorAt = now;
-                _degraded = true;
+                MarkBridgeError(ex, now);
                 stale = true;
                 sourceDetail = "ib_open_orders_error";
             }

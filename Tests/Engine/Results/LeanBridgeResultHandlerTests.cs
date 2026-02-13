@@ -19,6 +19,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Threading;
+using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using QuantConnect;
 using QuantConnect.Algorithm;
@@ -40,6 +41,8 @@ namespace QuantConnect.Tests.Engine.Results
     public class LeanBridgeResultHandlerTests
     {
         private MethodInfo _buildPositionsMethod;
+        private MethodInfo _buildOpenOrdersMethod;
+        private MethodInfo _tryWriteStatusMethod;
 
         [SetUp]
         public void SetUp()
@@ -49,6 +52,18 @@ namespace QuantConnect.Tests.Engine.Results
                 BindingFlags.NonPublic | BindingFlags.Instance
             );
             Assert.IsNotNull(_buildPositionsMethod, "BuildPositions should be accessible via reflection");
+
+            _buildOpenOrdersMethod = typeof(LeanBridgeResultHandler).GetMethod(
+                "BuildOpenOrders",
+                BindingFlags.NonPublic | BindingFlags.Instance
+            );
+            Assert.IsNotNull(_buildOpenOrdersMethod, "BuildOpenOrders should be accessible via reflection");
+
+            _tryWriteStatusMethod = typeof(LeanBridgeResultHandler).GetMethod(
+                "TryWriteStatus",
+                BindingFlags.NonPublic | BindingFlags.Instance
+            );
+            Assert.IsNotNull(_tryWriteStatusMethod, "TryWriteStatus should be accessible via reflection");
         }
 
         [Test]
@@ -211,6 +226,89 @@ namespace QuantConnect.Tests.Engine.Results
             }
         }
 
+        [Test]
+        public void BuildOpenOrdersRetriesTransientCollectionModifiedError()
+        {
+            var algorithm = new AlgorithmStub();
+            algorithm.AddSecurities(Resolution.Minute, equities: new List<string> { "SPY" });
+
+            using var brokerage = new FlakyOpenOrdersBrokerage();
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            using var api = new QuantConnect.Api.Api();
+            var transactionHandler = new BrokerageTransactionHandler();
+            var resultHandler = new TestResultHandler();
+            transactionHandler.Initialize(algorithm, brokerage, resultHandler);
+            algorithm.Transactions.SetOrderProcessor(transactionHandler);
+
+            var bridgeHandler = new LeanBridgeResultHandler();
+            var job = new LiveNodePacket();
+            bridgeHandler.Initialize(new ResultHandlerInitializeParameters(job, messaging, api, transactionHandler, null));
+            bridgeHandler.SetAlgorithm(algorithm, 100000m);
+
+            var payload = (Dictionary<string, object>)_buildOpenOrdersMethod.Invoke(
+                bridgeHandler,
+                new object[] { DateTime.UtcNow }
+            );
+            var items = (List<Dictionary<string, object>>)payload["items"];
+
+            Assert.AreEqual(1, items.Count, "Open orders should recover after a transient collection-modified error.");
+            Assert.AreEqual("ib_open_orders", payload["source_detail"]);
+            Assert.AreEqual(false, payload["stale"]);
+        }
+
+        [Test]
+        public void TryWriteStatusClearsExpiredDegradedState()
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), "lean-bridge-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            var statusPath = Path.Combine(tempDir, "lean_bridge_status.json");
+
+            var originalOutputDir = Config.Get("lean-bridge-output-dir", string.Empty);
+            var originalHeartbeatSeconds = Config.Get("lean-bridge-heartbeat-seconds", string.Empty);
+
+            LeanBridgeResultHandler handler = null;
+            using var messaging = new QuantConnect.Messaging.Messaging();
+            using var api = new QuantConnect.Api.Api();
+            try
+            {
+                Config.Set("lean-bridge-output-dir", tempDir);
+                Config.Set("lean-bridge-heartbeat-seconds", "1");
+
+                handler = new LeanBridgeResultHandler();
+                var job = new LiveNodePacket
+                {
+                    DeployId = "test",
+                    UserId = 1,
+                    ProjectId = 1
+                };
+                var transactionHandler = new BacktestingTransactionHandler();
+
+                handler.Initialize(new ResultHandlerInitializeParameters(job, messaging, api, transactionHandler, null));
+
+                typeof(LeanBridgeResultHandler)
+                    .GetField("_degraded", BindingFlags.NonPublic | BindingFlags.Instance)?
+                    .SetValue(handler, true);
+                typeof(LeanBridgeResultHandler)
+                    .GetField("_lastError", BindingFlags.NonPublic | BindingFlags.Instance)?
+                    .SetValue(handler, "Collection was modified; enumeration operation may not execute.");
+                typeof(LeanBridgeResultHandler)
+                    .GetField("_lastErrorAt", BindingFlags.NonPublic | BindingFlags.Instance)?
+                    .SetValue(handler, DateTime.UtcNow.AddMinutes(-2));
+
+                _tryWriteStatusMethod.Invoke(handler, new object[] { DateTime.UtcNow });
+
+                var json = JObject.Parse(File.ReadAllText(statusPath));
+                Assert.AreEqual("ok", (string)json["status"], "Expired degraded status should self-recover.");
+                Assert.IsTrue(json["last_error"] == null || json["last_error"].Type == JTokenType.Null);
+            }
+            finally
+            {
+                handler?.Exit();
+                Config.Set("lean-bridge-output-dir", originalOutputDir);
+                Config.Set("lean-bridge-heartbeat-seconds", originalHeartbeatSeconds);
+            }
+        }
+
         private class EmptyHoldingsBrokerage : Brokerage
         {
             public override bool IsConnected => true;
@@ -333,6 +431,28 @@ namespace QuantConnect.Tests.Engine.Results
                         CurrencySymbol = "$"
                     }
                 };
+            }
+        }
+
+        private class FlakyOpenOrdersBrokerage : EmptyHoldingsBrokerage
+        {
+            private int _calls;
+
+            public override List<Order> GetOpenOrders()
+            {
+                _calls += 1;
+                if (_calls == 1)
+                {
+                    throw new InvalidOperationException("Collection was modified; enumeration operation may not execute.");
+                }
+
+                var order = new MarketOrder(Symbols.SPY, 1, DateTime.UtcNow)
+                {
+                    Id = 1,
+                    Tag = "oi_test_1"
+                };
+                order.BrokerId.Add("1001");
+                return new List<Order> { order };
             }
         }
     }
