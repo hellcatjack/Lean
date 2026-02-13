@@ -12,7 +12,7 @@ namespace QuantConnect.Tests.Algorithm
         public void ParsesQuantityAndWeight()
         {
             var path = Path.GetTempFileName();
-            File.WriteAllText(path, "[{\"order_intent_id\":\"oi_1_1\",\"symbol\":\"AAPL\",\"quantity\":1},{\"order_intent_id\":\"oi_1_2\",\"symbol\":\"MSFT\",\"weight\":0.2}]");
+            File.WriteAllText(path, "[{\"order_intent_id\":\"oi_1_1\",\"symbol\":\"AAPL\",\"quantity\":1,\"prime_price\":189.25},{\"order_intent_id\":\"oi_1_2\",\"symbol\":\"MSFT\",\"weight\":0.2}]");
 
             var items = LeanBridgeExecutionAlgorithm.LoadIntentItems(path);
 
@@ -21,6 +21,7 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual("AAPL", items[0].Symbol);
             Assert.AreEqual(1m, items[0].Quantity);
             Assert.AreEqual(0m, items[0].Weight);
+            Assert.AreEqual(189.25m, items[0].PrimePrice);
             Assert.AreEqual("oi_1_2", items[1].OrderIntentId);
             Assert.AreEqual("MSFT", items[1].Symbol);
             Assert.AreEqual(0m, items[1].Quantity);
@@ -140,6 +141,62 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual(expected, LeanBridgeExecutionAlgorithm.NormalizeOrderType(input));
         }
 
+        [TestCase("MKT", false)]
+        [TestCase("LMT", true)]
+        [TestCase("PEG_MID", true)]
+        [TestCase("ADAPTIVE_LMT", false)]
+        [TestCase("Adaptive LMT(IBKR)", false)]
+        public void RequiresLimitPriceMatchesOrderType(string input, bool expected)
+        {
+            Assert.AreEqual(expected, LeanBridgeExecutionAlgorithm.RequiresLimitPrice(input));
+        }
+
+        [TestCase("MKT", false)]
+        [TestCase("LMT", false)]
+        [TestCase("PEG_MID", false)]
+        [TestCase("ADAPTIVE_LMT", true)]
+        [TestCase("Adaptive LMT(IBKR)", true)]
+        public void AdaptiveLmtUsesAsynchronousSubmission(string input, bool expected)
+        {
+            Assert.AreEqual(expected, LeanBridgeExecutionAlgorithm.ShouldUseAsynchronousSubmission(input));
+        }
+
+        [Test]
+        public void ExecutionGateAllowsSingleEntryUntilReleased()
+        {
+            var gate = 0;
+
+            Assert.IsTrue(LeanBridgeExecutionAlgorithm.TryEnterExecutionGate(ref gate));
+            Assert.IsFalse(LeanBridgeExecutionAlgorithm.TryEnterExecutionGate(ref gate));
+
+            LeanBridgeExecutionAlgorithm.ExitExecutionGate(ref gate);
+
+            Assert.IsTrue(LeanBridgeExecutionAlgorithm.TryEnterExecutionGate(ref gate));
+        }
+
+        [TestCase(true, true)]
+        [TestCase(false, false)]
+        public void WarmupGateDefersExecutionUntilWarmupFinishes(bool isWarmingUp, bool expected)
+        {
+            Assert.AreEqual(expected, LeanBridgeExecutionAlgorithm.ShouldDeferExecutionForWarmup(isWarmingUp));
+        }
+
+        [TestCase(false, false, true)]
+        [TestCase(false, true, true)]
+        [TestCase(true, false, true)]
+        [TestCase(true, true, false)]
+        public void ReadinessGateRequiresPostInitializeAndWarmupReady(
+            bool postInitialized,
+            bool warmupReady,
+            bool expected
+        )
+        {
+            Assert.AreEqual(
+                expected,
+                LeanBridgeExecutionAlgorithm.ShouldDeferExecutionUntilReady(postInitialized, warmupReady)
+            );
+        }
+
         [Test]
         public void DetectsAllIntentOrdersTerminal()
         {
@@ -154,6 +211,69 @@ namespace QuantConnect.Tests.Algorithm
 
             terminalOrderIds.Remove(11);
             Assert.IsFalse(LeanBridgeExecutionAlgorithm.AreAllIntentOrdersTerminal(intentOrders, terminalOrderIds));
+        }
+
+        [Test]
+        public void ShouldNotRequestAllTerminalExitBeforeSubmissionCompletes()
+        {
+            var intentOrders = new Dictionary<string, HashSet<int>>
+            {
+                { "oi_1_1", new HashSet<int> { 101 } }
+            };
+            var terminalOrderIds = new HashSet<int> { 101 };
+
+            Assert.IsFalse(
+                LeanBridgeExecutionAlgorithm.ShouldRequestAllTerminalExit(
+                    exitRequested: false,
+                    submissionCompleted: false,
+                    intentOrders: intentOrders,
+                    terminalOrderIds: terminalOrderIds
+                )
+            );
+        }
+
+        [Test]
+        public void ShouldRequestAllTerminalExitAfterSubmissionCompletes()
+        {
+            var intentOrders = new Dictionary<string, HashSet<int>>
+            {
+                { "oi_1_1", new HashSet<int> { 101 } }
+            };
+            var terminalOrderIds = new HashSet<int> { 101 };
+
+            Assert.IsTrue(
+                LeanBridgeExecutionAlgorithm.ShouldRequestAllTerminalExit(
+                    exitRequested: false,
+                    submissionCompleted: true,
+                    intentOrders: intentOrders,
+                    terminalOrderIds: terminalOrderIds
+                )
+            );
+            Assert.IsFalse(
+                LeanBridgeExecutionAlgorithm.ShouldRequestAllTerminalExit(
+                    exitRequested: true,
+                    submissionCompleted: true,
+                    intentOrders: intentOrders,
+                    terminalOrderIds: terminalOrderIds
+                )
+            );
+        }
+
+        [Test]
+        public void ParsesUnfilledHandlingParams()
+        {
+            var path = Path.GetTempFileName();
+            File.WriteAllText(
+                path,
+                "{\"unfilled_timeout_seconds\":600,\"unfilled_reprice_interval_seconds\":30,\"unfilled_max_reprices\":5,\"unfilled_max_price_deviation_pct\":1.5}"
+            );
+
+            var p = LeanBridgeExecutionAlgorithm.LoadExecutionParams(path);
+
+            Assert.AreEqual(600, p.UnfilledTimeoutSeconds);
+            Assert.AreEqual(30, p.UnfilledRepriceIntervalSeconds);
+            Assert.AreEqual(5, p.UnfilledMaxReprices);
+            Assert.AreEqual(1.5m, p.UnfilledMaxPriceDeviationPct);
         }
     }
 }

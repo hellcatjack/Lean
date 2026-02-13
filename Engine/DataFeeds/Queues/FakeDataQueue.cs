@@ -62,7 +62,8 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Queues
         /// <summary>
         /// Initializes a new instance of the <see cref="FakeDataQueue"/> class to randomly emit data for each symbol
         /// </summary>
-        public FakeDataQueue(IDataAggregator dataAggregator, int dataPointsPerSecondPerSymbol = 500000)
+        // Default kept intentionally low so enabling FakeDataQueue in a local config won't saturate CPU/memory.
+        public FakeDataQueue(IDataAggregator dataAggregator, int dataPointsPerSecondPerSymbol = 10)
         {
             _aggregator = dataAggregator;
             _dataPointsPerSecondPerSymbol = dataPointsPerSecondPerSymbol;
@@ -176,7 +177,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Queues
                 var trades = SubscriptionManager.DefaultDataTypes()[symbol.SecurityType].Contains(TickType.Trade);
                 var quotes = SubscriptionManager.DefaultDataTypes()[symbol.SecurityType].Contains(TickType.Quote);
 
-                // emits 500k per second
+                // emits `_dataPointsPerSecondPerSymbol` points per second
                 for (var i = 0; i < _dataPointsPerSecondPerSymbol; i++)
                 {
                     var now = TimeProvider.GetUtcNow();
